@@ -1,0 +1,3 @@
+Plantly reminds you when each of your plants needs water, based on its type and the season.
+
+Add your plants, set the room they live in, and get one calm reminder a day.

@@ -92,7 +92,7 @@ export function findSourceFiles(root: string, pattern: string, sourceLanguage: s
 
   const files: LocaleFile[] = [];
   for (const rel of all.sort()) {
-    if (!rel.endsWith('.json')) continue;
+    if (!/\.(json|arb|txt)$/.test(rel)) continue;
     const match = matcher.exec(rel);
     if (!match || match.groups?.lang !== sourceLanguage) continue;
     const wild = groups
@@ -101,6 +101,43 @@ export function findSourceFiles(root: string, pattern: string, sourceLanguage: s
     files.push({ id: fill(null, wild), pathFor: lang => fill(lang, wild) });
   }
   return files;
+}
+
+/**
+ * Key pattern -> RegExp. "*" matches within one segment, "**" any number of segments. A
+ * pattern without a dot matches the last segment anywhere ("id" matches "steps.2.id").
+ */
+export function keyPattern(pattern: string): RegExp {
+  const body = pattern
+    .split(/(\*\*|\*)/)
+    .map(part => (part === '**' ? '.*' : part === '*' ? '[^.]*' : escapeRegExp(part)))
+    .join('');
+  return new RegExp(pattern.includes('.') ? `^${body}$` : `(?:^|\\.)${body}$`);
+}
+
+/** Path pattern -> RegExp ("*" within a folder, "**" across folders, {lang} as written). */
+export function pathPattern(pattern: string): RegExp {
+  const body = pattern
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .split(/(\*\*\/?|\*)/)
+    .map(part => (part.startsWith('**') ? '(?:.*/)?' : part === '*' ? '[^/]*' : escapeRegExp(part)))
+    .join('');
+  return new RegExp(`^${body}$`);
+}
+
+/**
+ * Values that are not text and stay as they are in every language: URLs, email addresses,
+ * file paths and plain numbers or codes without spaces.
+ */
+export function isLiteralValue(value: string): boolean {
+  const v = value.trim();
+  return (
+    /^(?:https?:\/\/|mailto:|tel:)\S+$/i.test(v) ||
+    /^[\w.+-]+@[\w-]+(?:\.[\w-]+)+$/.test(v) ||
+    /^(?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)*\.(?:png|jpe?g|gif|svg|webp|avif|ico|mp3|mp4|webm|wav|pdf|json|css|js|html?)$/i.test(v) ||
+    /^[\d\s.,:%+\-–/×x#]+$/.test(v)
+  );
 }
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -225,6 +262,27 @@ export function detectFormat(text: string | null): JsonFormat {
 
 export function serialize(value: JsonValue, format: JsonFormat): string {
   return JSON.stringify(value, null, format.indent) + (format.finalNewline ? '\n' : '');
+}
+
+const txtKey = (rel: string): string => path.posix.basename(rel.replace(/\\/g, '/'), '.txt');
+
+/**
+ * Parses a locale file. A .txt file (fastlane metadata: description.txt, keywords.txt) is one
+ * string, keyed by its file name, so maxLength patterns like "keywords" apply to it.
+ */
+export function parseDoc(rel: string, text: string): JsonValue {
+  if (rel.endsWith('.txt')) return { [txtKey(rel)]: text.replace(/\r?\n$/, '') };
+  return JSON.parse(text) as JsonValue;
+}
+
+/** Flutter ARB metadata ("@@locale", "@title": { description, placeholders }): not text. */
+export const isArbMetadata = (rel: string, key: string): boolean => rel.endsWith('.arb') && key.startsWith('@');
+
+/** Text of a locale file, or null when a .txt file has no value to write. */
+export function serializeDoc(rel: string, doc: JsonValue, format: JsonFormat): string | null {
+  if (!rel.endsWith('.txt')) return serialize(doc, format);
+  const value = (doc as Record<string, JsonValue>)[txtKey(rel)];
+  return typeof value === 'string' ? value + (format.finalNewline ? '\n' : '') : null;
 }
 
 export function readText(file: string): string | null {

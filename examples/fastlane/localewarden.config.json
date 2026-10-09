@@ -1,0 +1,10 @@
+{
+  "sourceLanguage": "en-US",
+  "targetLanguages": ["de-DE", "fr-FR", "es-MX", "ja"],
+  "files": "fastlane/metadata/{lang}/*.txt",
+  "context": "Plantly is a mobile app that reminds people when to water their houseplants.",
+  "doNotTranslate": ["Plantly"],
+  "formality": { "de": "informal", "fr": "formal", "es": "informal" },
+  "maxLength": { "name": 30, "subtitle": 30, "keywords": 100, "promotional_text": 170, "description": 4000 },
+  "termNotes": { "keywords": "a comma-separated keyword list for store search, not a sentence" }
+}

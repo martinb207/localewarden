@@ -1,6 +1,6 @@
 {
   "name": "localewarden",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Incremental AI translation for JSON locale files: translates only what changed, never overwrites hand edits, and checks every result before writing it.",
   "type": "module",
   "bin": {
@@ -39,6 +39,17 @@
     "json",
     "locales",
     "i18next",
+    "react-intl",
+    "vue-i18n",
+    "next-intl",
+    "fastlane",
+    "flutter",
+    "arb",
+    "app-store",
+    "ai-translation",
+    "gpt",
+    "chatgpt",
+    "translation-quality",
     "cli"
   ],
   "repository": {

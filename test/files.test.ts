@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveConfig } from '../src/config.js';
-import { buildTarget, detectFormat, findSourceFiles, flatten } from '../src/files.js';
+import { buildTarget, detectFormat, findSourceFiles, flatten, isLiteralValue, keyPattern, pathPattern } from '../src/files.js';
 import { batchPrompt } from '../src/prompt.js';
 import { tempProject } from './helpers.js';
 
@@ -21,6 +21,31 @@ describe('findSourceFiles', () => {
     const config = tempProject({ 'i18n/messages.en.json': {}, 'i18n/messages.de.json': {} });
     const files = findSourceFiles(config.root, 'i18n/messages.{lang}.json', 'en');
     expect(files.map(f => f.pathFor('pt-BR'))).toEqual(['i18n/messages.pt-BR.json']);
+  });
+});
+
+describe('patterns', () => {
+  it('matches keys by segment', () => {
+    expect(keyPattern('id').test('steps.2.id')).toBe(true);
+    expect(keyPattern('id').test('steps.2.hidden')).toBe(false);
+    expect(keyPattern('*.meta.title').test('home.meta.title')).toBe(true);
+    expect(keyPattern('*.meta.title').test('a.home.meta.title')).toBe(false);
+    expect(keyPattern('**.meta.title').test('a.home.meta.title')).toBe(true);
+  });
+
+  it('matches paths', () => {
+    expect(pathPattern('locales/{lang}/nav.json').test('locales/{lang}/nav.json')).toBe(true);
+    expect(pathPattern('**/nav.json').test('src/locales/en/nav.json')).toBe(true);
+    expect(pathPattern('locales/*/nav.json').test('locales/en/nav.json')).toBe(true);
+  });
+
+  it('recognises values that are not text', () => {
+    for (const v of ['https://example.com/a?b=1', 'hello@example.com', 'images/a.png', '/img/x.svg', '42', '3:45', '+41 44 000 00 00']) {
+      expect(isLiteralValue(v)).toBe(true);
+    }
+    for (const v of ['Hello', 'Visit https://example.com for more', 'A', 'Step 2']) {
+      expect(isLiteralValue(v)).toBe(false);
+    }
   });
 });
 

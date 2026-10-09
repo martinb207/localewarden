@@ -16,6 +16,10 @@ export interface PromptItem {
   source: string;
   /** Existing translation of an older version of the source (revision mode). */
   previous?: string;
+  /** Maximum characters of the translation (store listings, SEO titles, buttons). */
+  maxLength?: number;
+  /** Set when --fix-flagged revises a translation that lost content. */
+  completing?: boolean;
 }
 
 function intro(config: Config, lang: string): string {
@@ -64,10 +68,15 @@ export function batchPrompt(config: Config, lang: string, items: PromptItem[]): 
     revised.length > 0
       ? ` REVISION: the source of some elements was edited after they had been translated. Their existing translation (of the older source) by 1-based position: ${JSON.stringify(Object.fromEntries(revised))}. For these elements, ${REVISION_RULE}`
       : '';
+  const limited = items.map((item, i) => (item.maxLength ? `element ${i + 1} at most ${item.maxLength}` : null)).filter(Boolean);
+  const lengths =
+    limited.length > 0
+      ? ` LENGTH LIMIT: these elements are cut off past a character limit (counting spaces): ${limited.join(', ')} characters. Stay under it even if that means a shorter, freer phrasing; never pad.`
+      : '';
   const plural = items.some(item => /_(zero|one|two|few|many|other)$/.test(item.key))
     ? ` PLURALS: keys ending in _zero, _one, _two, _few, _many or _other are plural forms (Unicode CLDR categories) of ${languageName(lang)}. Write the form of that category, even when the source text given is the English plural (_zero is used when the count is 0, _two when it is 2; keep the {{count}} placeholder).`
     : '';
-  return `${intro(config, lang)} Translate each string in the JSON array. Return ONLY a valid JSON array of strings with the same number of elements in the same order. No explanations, no code fences.${rules(config, lang, items.map(i => i.source))}${keys}${plural}${revision}`;
+  return `${intro(config, lang)} Translate each string in the JSON array. Return ONLY a valid JSON array of strings with the same number of elements in the same order. No explanations, no code fences.${rules(config, lang, items.map(i => i.source))}${keys}${lengths}${plural}${revision}`;
 }
 
 /** System prompt for translating one string as plain text. */
@@ -75,7 +84,10 @@ export function singlePrompt(config: Config, lang: string, item: PromptItem, ext
   const revision = item.previous
     ? ` REVISION: the source was edited after it had been translated. Existing translation (of the older source): ${JSON.stringify(item.previous)}. ${REVISION_RULE[0].toUpperCase()}${REVISION_RULE.slice(1)}`
     : '';
-  return `${intro(config, lang)} The user message is one UI string (key: ${item.key}). Output only the translation, with no explanations, quotes or commentary.${rules(config, lang, [item.source])}${revision}${extra}`;
+  const length = item.maxLength
+    ? ` LENGTH LIMIT: at most ${item.maxLength} characters including spaces; the text is cut off past that. Prefer a shorter, freer phrasing over a literal one.`
+    : '';
+  return `${intro(config, lang)}${length} The user message is one UI string (key: ${item.key}). Output only the translation, with no explanations, quotes or commentary.${rules(config, lang, [item.source])}${revision}${extra}`;
 }
 
 /** Turns a translation request into a minimal correction of an existing translation. */

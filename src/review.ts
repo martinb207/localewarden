@@ -1,8 +1,8 @@
 import path from 'node:path';
 import type { Config } from './config.js';
-import { flatten, readText, type JsonValue } from './files.js';
-import { parseReviewId, State } from './state.js';
-import { hash } from './util.js';
+import { findSourceFiles, flatten, parseDoc, readText } from './files.js';
+import { parseReviewId, reviewId, State } from './state.js';
+import { hash, today } from './util.js';
 
 export interface ReviewItem {
   id: string;
@@ -16,10 +16,11 @@ export interface ReviewItem {
 }
 
 function currentValue(config: Config, lang: string, fileId: string, key: string): string | undefined {
-  const text = readText(path.join(config.root, fileId.split('{lang}').join(lang)));
+  const rel = fileId.split('{lang}').join(lang);
+  const text = readText(path.join(config.root, rel));
   if (text === null) return undefined;
   try {
-    return flatten(JSON.parse(text) as JsonValue).get(key);
+    return flatten(parseDoc(rel, text)).get(key);
   } catch {
     return undefined;
   }
@@ -66,6 +67,23 @@ export function updateReview(config: Config, action: 'approve' | 'release', sele
       state.invalidate(lang, file, key);
     }
     changed++;
+  }
+  // Approving a string that is not on the list marks it as checked by a person: it is then
+  // protected like a hand edit and the quality check no longer reports warnings for it.
+  if (action === 'approve') {
+    const exact = selectors.filter(sel => sel !== 'all' && !sel.endsWith(':*') && sel.includes(':'));
+    for (const selector of exact) {
+      const colon = selector.indexOf(':');
+      const [lang, key] = [selector.slice(0, colon), selector.slice(colon + 1)];
+      for (const file of findSourceFiles(config.root, config.files, config.sourceLanguage)) {
+        const id = reviewId(lang, file.id, key);
+        if (state.review[id]) continue;
+        const value = currentValue(config, lang, file.id, key);
+        if (value === undefined) continue;
+        state.review[id] = { status: 'approved', reason: 'approved-by-hand', file: file.pathFor(lang), since: today(), valueHash: hash(value) };
+        changed++;
+      }
+    }
   }
   if (changed > 0) state.save();
   return changed;

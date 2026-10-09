@@ -8,7 +8,8 @@ import {
   registerFor,
   withoutQuotedSpeech,
 } from './style.js';
-import { baseLanguage, escapeRegExp } from './util.js';
+import { Scope } from './scope.js';
+import { baseLanguage, escapeRegExp, isTraditionalChinese } from './util.js';
 
 /**
  * Deterministic quality checks. No API calls, so they can run in CI on every commit.
@@ -22,12 +23,14 @@ import { baseLanguage, escapeRegExp } from './util.js';
  *   years         a year from the source is missing or changed (citations, dates)
  *   formality     the other form of address than configured, or both mixed;
  *                 masculine-only forms for "you" when genderNeutral is on
+ *   length        longer than the maxLength configured for the key
  *   titlecase     English Title Case copied into a sentence-case language
  *   ampersand     "&" in a language that writes the word
  *   glossary      a glossary rendering or a doNotTranslate name is missing
  *   untranslated  identical to the source (prose of 3+ words)
  *   partial       source-language words left inside an otherwise translated string,
- *                 or a dropped hedge ("tend to" stated as certain)
+ *                 a dropped hedge ("tend to" stated as certain), or a translation much
+ *                 shorter than its source (content missing or cut off)
  */
 export type CheckName =
   | 'placeholder'
@@ -36,6 +39,7 @@ export type CheckName =
   | 'markup'
   | 'years'
   | 'formality'
+  | 'length'
   | 'titlecase'
   | 'ampersand'
   | 'glossary'
@@ -49,6 +53,7 @@ export const CHECKS: CheckName[] = [
   'markup',
   'years',
   'formality',
+  'length',
   'titlecase',
   'ampersand',
   'glossary',
@@ -64,6 +69,7 @@ export const FIXABLE_CHECKS = new Set<CheckName>([
   'markup',
   'years',
   'formality',
+  'length',
   'titlecase',
   'ampersand',
   'glossary',
@@ -78,10 +84,29 @@ export interface Issue {
 export class Checker {
   readonly config: Config;
   readonly placeholderRe: RegExp;
+  readonly scope: Scope;
+  /** Words of termNotes and doNotTranslate: terms a translation may keep in the source language. */
+  readonly keptWords: Set<string>;
 
   constructor(config: Config) {
     this.config = config;
     this.placeholderRe = placeholderRegExp(config.placeholders);
+    this.scope = new Scope(config);
+    this.keptWords = new Set(
+      [...Object.keys(config.termNotes), ...config.doNotTranslate].flatMap(term => term.toLowerCase().split(/[^\p{L}]+/u)).filter(Boolean)
+    );
+  }
+
+  /** The text without doNotTranslate names, which stay the same in every language. */
+  withoutNames(text: string): string {
+    return this.config.doNotTranslate.reduce((value, name) => value.split(name).join(' '), text);
+  }
+
+  /** "62 characters, limit 60", or null. */
+  tooLong(key: string, text: string): string | null {
+    const max = this.scope.maxLength(key);
+    const length = [...text].length;
+    return max !== undefined && length > max ? `${length} characters, limit ${max}` : null;
   }
 
   get englishSource(): boolean {
@@ -138,23 +163,29 @@ export class Checker {
       SENTENCE_CASE_LANGUAGES.has(base) &&
       isEnglishTitleCase(source)
     ) {
-      const capitals = midCapitals(text, source, this.config.doNotTranslate);
+      const capitals = midCapitals(text, source, this.config.doNotTranslate, lang);
       if (capitals.length >= (source.trim().split(/\s+/).length <= 3 ? 1 : 2)) {
         add('titlecase', `capitalised: ${capitals.join(' ')}`);
       }
     }
 
+    const long = this.tooLong(key, text);
+    if (long) add('length', long);
+
     const ampersands = (value: string) => value.split(' & ').length - 1;
     if (NO_AMPERSAND_LANGUAGES.has(base) && ampersands(text) > ampersands(source)) add('ampersand');
 
-    if (isUnchangedProse(source, text, this.placeholderRe)) add('untranslated');
+    if (isUnchangedProse(this.withoutNames(source), this.withoutNames(text), this.placeholderRe)) add('untranslated');
+
+    const short = muchShorter(lang, source, text);
+    if (short) add('partial', short);
 
     if (this.englishSource && text !== source) {
       const copied = sourceRun(source, text);
       if (copied) add('partial', `source text left in: "${copied}"`);
       const lead = !copied ? sourceBoldLeadIn(source, text, this.config.doNotTranslate) : null;
       if (lead) add('partial', `bold lead-in still in the source language: "${lead}"`);
-      const mixed = !copied && !lead ? englishInNativeScript(lang, source, text, this.placeholderRe) : null;
+      const mixed = !copied && !lead ? englishInNativeScript(lang, source, text, this.placeholderRe, this.keptWords) : null;
       if (mixed) add('partial', mixed);
       if (droppedHedge(lang, source, text)) {
         add('partial', 'hedge dropped: the source says "tend to", the translation states it as certain');
@@ -175,7 +206,7 @@ export class Checker {
     const placeholders = this.placeholdersMatch(key, source, text) ? null : `placeholder mismatch: ${this.placeholderNote(source, text)}`;
     const foreign = foreignScript(this.config.sourceLanguage, source) ? null : foreignScript(lang, text);
     const links = hrefSignature(source) !== hrefSignature(text) ? `links changed: [${hrefSignature(source)}] -> [${hrefSignature(text)}]` : null;
-    const echoed = isUnchangedProse(source, text, this.placeholderRe) ? 'returned the source text unchanged' : null;
+    const echoed = isUnchangedProse(this.withoutNames(source), this.withoutNames(text), this.placeholderRe) ? 'returned the source text unchanged' : null;
     const broken = brokenMarkup(source) ? null : brokenMarkup(text);
     const boldMarkers = (value: string) => (value.match(/\*\*/g) ?? []).length % 2;
     const brokenBold = boldMarkers(text) === 1 && boldMarkers(source) === 0 ? 'unbalanced ** markers' : null;
@@ -183,7 +214,7 @@ export class Checker {
     const hard = placeholders ?? unsafeAdditions(source, text) ?? foreign ?? links ?? echoed ?? broken ?? brokenBold ?? droppedBullets(source, text) ?? leaked;
     const tags = tagCount(source) !== tagCount(text) ? `${tagCount(source)} tags in the source, got ${tagCount(text)}` : null;
     const copied = this.englishSource && text !== source ? sourceRun(source, text) : null;
-    return { hard, soft: hard ?? tags ?? yearDifference(source, text) ?? (copied ? `source text left in: "${copied}"` : null) };
+    return { hard, soft: hard ?? this.tooLong(key, text) ?? muchShorter(lang, source, text) ?? tags ?? yearDifference(source, text) ?? (copied ? `source text left in: "${copied}"` : null) };
   }
 }
 
@@ -242,8 +273,25 @@ const LATIN_LANGUAGES = new Set([
 // Latin glued to a lookalike alphabet inside one word ("Вarda": Cyrillic В + Latin arda).
 const HOMOGLYPH_WORD = /(?=\p{L}*\p{Script=Latin})(?=\p{L}*[\p{Script=Cyrillic}\p{Script=Greek}])\p{L}+/u;
 
+// Common characters that exist in only one of the two Chinese scripts (pairs at the same index).
+const SIMPLIFIED_ONLY = '们这说时会来对个为发过还让现实动门问间题体关点应开东头书长见认学页电话语读写买卖钱网设计习惯觉机帮爱车钟儿气无边进选择检样经验数据项结种类业务环节';
+const TRADITIONAL_ONLY = '們這說時會來對個為發過還讓現實動門問間題體關點應開東頭書長見認學頁電話語讀寫買賣錢網設計習慣覺機幫愛車鐘兒氣無邊進選擇檢樣經驗數據項結種類業務環節';
+
+/** Simplified characters in Traditional Chinese text, or the reverse (2+ distinct ones). */
+export function wrongChineseScript(lang: string, text: string): string | null {
+  if (baseLanguage(lang) !== 'zh') return null;
+  const traditional = isTraditionalChinese(lang);
+  const wrong = traditional ? SIMPLIFIED_ONLY : TRADITIONAL_ONLY;
+  const found = [...new Set([...text].filter(ch => wrong.includes(ch)))];
+  return found.length >= 2
+    ? `${traditional ? 'Simplified' : 'Traditional'} Chinese characters in ${lang}: ${found.slice(0, 6).join('')}`
+    : null;
+}
+
 /** Why `text` contains letters that cannot belong to `lang`, or null. */
 export function foreignScript(lang: string, text: string): string | null {
+  const chinese = wrongChineseScript(lang, text);
+  if (chinese) return chinese;
   const base = baseLanguage(lang);
   const native = NATIVE_SCRIPTS[base] ?? (LATIN_LANGUAGES.has(base) ? [] : null);
   if (native === null) return null;
@@ -272,16 +320,23 @@ const unescapeEntities = (text: string): string =>
     .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
     .replace(/&colon;|&#0*58;|&#x0*3a;/gi, ':');
 
-/** Tag names, in lower case. Numbered <0> tags (react-i18next) are placeholders, not HTML. */
+// HTML elements, so text in angle brackets ("<minutes>", "<your name>") is not taken for markup.
+const HTML_ELEMENTS = new Set(
+  ('a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html i iframe img input ins kbd label legend li link main map mark math meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script section select slot small source span strong style sub summary sup svg table tbody td template textarea tfoot th thead time title tr track u ul var video wbr animate foreignobject use image set').split(' ')
+);
+
+/** HTML element names, in lower case. Numbered <0> tags (react-i18next) are placeholders. */
 const tagNames = (html: string): Set<string> =>
-  new Set([...html.matchAll(/<\/?([a-z][\w-]*)/gi)].map(m => m[1].toLowerCase()));
+  new Set([...html.matchAll(/<\/?([a-z][\w-]*)/gi)].map(m => m[1].toLowerCase()).filter(tag => HTML_ELEMENTS.has(tag)));
 
 const TEXT_ATTRIBUTES = new Set(['title', 'alt', 'aria-label', 'aria-description', 'placeholder']);
 
 /** Every attribute as "name=value" (value without quotes), in lower case. */
 const attributes = (html: string): Set<string> => {
   const found = new Set<string>();
-  for (const [, inner] of html.matchAll(/<[a-z][\w-]*\s([^>]*)>?/gi)) {
+  for (const [, tag, inner] of html.matchAll(/<([a-z][\w-]*)\s([^>]*)>?/gi)) {
+    // "<dakika 20)" (sw: under 20 minutes) is text, not a tag.
+    if (!HTML_ELEMENTS.has(tag.toLowerCase())) continue;
     for (const [, name, v1, v2, v3] of inner.matchAll(/([^\s"'=<>\/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
       const attr = name.toLowerCase();
       // Text attributes are translated along with the visible text; only their presence counts.
@@ -292,7 +347,10 @@ const attributes = (html: string): Set<string> => {
   return found;
 };
 
-const DANGEROUS_URL = /(?:javascript|vbscript|data)\s*:/gi;
+// Script URLs in a link target or Markdown link. Plain "data:" in prose is a word (pt/it "date:").
+const DANGEROUS_URL = /(?:(?:href|src|action|formaction|xlink:href|poster|background)\s*=\s*["']?|\]\()\s*(?:javascript|vbscript|data)\s*:/gi;
+// Formatting a translator may add for emphasis or a title (no attributes): a markup warning, not a risk.
+const HARMLESS_TAGS = new Set(['br', 'i', 'b', 'em', 'strong', 'u', 's', 'sub', 'sup', 'small', 'mark', 'q', 'cite']);
 
 /**
  * Markup the translation adds that the source does not have: a new tag type, a new or changed
@@ -303,7 +361,7 @@ const DANGEROUS_URL = /(?:javascript|vbscript|data)\s*:/gi;
 export function unsafeAdditions(source: string, text: string): string | null {
   const [src, out] = [unescapeEntities(source), unescapeEntities(text)];
   const srcTags = tagNames(src);
-  const newTags = [...tagNames(out)].filter(tag => !srcTags.has(tag) && tag !== 'br');
+  const newTags = [...tagNames(out)].filter(tag => !srcTags.has(tag) && !HARMLESS_TAGS.has(tag));
   if (newTags.length > 0) return `HTML tag not in the source: <${newTags.join('>, <')}>`;
   const srcAttrs = attributes(src);
   const newAttrs = [...attributes(out)].filter(attr => !srcAttrs.has(attr));
@@ -375,8 +433,9 @@ const asciiDigits = (text: string): string =>
 export function yearDifference(source: string, text: string): string | null {
   // Decades ("the 2020s") are written in words or with suffixes in many languages.
   const decades = new Set(asciiDigits(source).match(/(?<!\d)(?:19|20)\d0(?=['’]?s\b)/g) ?? []);
+  // "1,900", "1.900" and "1 900" are numbers, not years: drop thousands separators first.
   const years = (value: string) =>
-    (asciiDigits(value).match(/(?<!\d)(?:19|20)\d\d(?!\d)/g) ?? []).filter(y => !decades.has(y)).sort().join(',');
+    (asciiDigits(value).replace(/(\d)[,.\u00a0\u202f ](?=\d{3}(?!\d))/g, '$1').match(/(?<!\d)(?:19|20)\d\d(?!\d)/g) ?? []).filter(y => !decades.has(y)).sort().join(',');
   const [a, b] = [years(source), years(text)];
   return a === b ? null : `source years [${a}], got [${b}]`;
 }
@@ -428,21 +487,27 @@ export function keptNameMissing(name: string, source: string, text: string): boo
 
 const COMMON_NAMES = new Set(['iOS', 'Android', 'Apple', 'Google', 'iPhone', 'iPad', 'Mac', 'Windows', 'Linux', 'AI', 'API', 'URL', 'PDF', 'FAQ', 'OK']);
 
-function midCapitals(text: string, source: string, names: string[]): string[] {
+// Polish capitalises "you" pronouns as a sign of respect ("W Twoim planie"): correct, not Title Case.
+const POLISH_RESPECT = /^(?:Ty|Twój|Twoja|Twoje|Twojego|Twojej|Twoim|Twoją|Twoich|Twoimi|Ciebie|Cię|Tobie|Tobą|Wy|Wasz|Wasza|Wasze|Wam|Was|Wami)$/u;
+
+function midCapitals(text: string, source: string, names: string[], lang = ''): string[] {
   const allowed = new Set([...COMMON_NAMES, ...names.flatMap(name => name.split(/\s+/))]);
   const isName = (word: string) =>
     allowed.has(word) ||
     new RegExp(`(?<!\\p{L})${escapeRegExp(word)}(?!\\p{L})`, 'u').test(source) ||
     [...allowed].some(name => name.length >= 4 && word.startsWith(name));
   return text
-    .split(/[.!?:—–\n•|]+/)
+    // Commas and brackets start segments too: list items ("SMART: Specific, Measurable") and
+    // bracketed words ("Customize (Optional)") are capitalised in many languages.
+    .split(/[.!?:—–\n•|,;()]+/)
     .flatMap(segment => {
       const words = segment.trim().split(/\s+/);
       const first = words.findIndex(word => /\p{L}/u.test(word));
       return first === -1 ? [] : words.slice(first + 1);
     })
     .map(word => word.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, ''))
-    .filter(word => word.length >= 3 && /^\p{Lu}\p{Ll}/u.test(word) && !isName(word));
+    .filter(word => word.length >= 3 && /^\p{Lu}\p{Ll}/u.test(word) && !isName(word))
+    .filter(word => !(baseLanguage(lang) === 'pl' && POLISH_RESPECT.test(word)));
 }
 
 function isEnglishTitleCase(source: string): boolean {
@@ -501,21 +566,29 @@ function sourceBoldLeadIn(source: string, text: string, names: string[]): string
   const translated = new Set(bold(text));
   for (const lead of bold(source)) {
     if (lead.length <= 15 || !/\p{Ll}{3}/u.test(lead) || names.some(name => lead.includes(name))) continue;
+    // Only capitalised words ("Apple App Store:", "Google Play"): a name, kept on purpose.
+    if (lead.split(/\s+/).every(word => !/\p{L}/u.test(word) || /^[^\p{L}]*\p{Lu}/u.test(word))) continue;
     if (translated.has(lead)) return lead;
   }
   return null;
 }
 
+const ICU_HEADER = /\{\s*[\w.-]+\s*,\s*(?:plural|select|selectordinal)\s*,/g;
+const ICU_HEADER_TEST = /\{\s*[\w.-]+\s*,\s*(?:plural|select|selectordinal)\s*,/;
+
 // Loanwords commonly written in Latin script inside non-Latin text.
 const LATIN_LOANWORDS = new Set(['email', 'online', 'offline', 'emoji', 'smartphone', 'podcast', 'podcasts', 'wifi', 'blog', 'login', 'like', 'likes']);
 
 /** Source-language words left inside a non-Latin-script translation ("Settings → Privacy"). */
-function englishInNativeScript(lang: string, source: string, text: string, placeholderRe: RegExp): string | null {
+function englishInNativeScript(lang: string, source: string, text: string, placeholderRe: RegExp, allowed: Set<string>): string | null {
   const base = baseLanguage(lang);
   // Greek writes many anglicisms in Latin script; not checked.
   if (!NATIVE_SCRIPTS[base] || base === 'el' || base === 'sr' || text === source) return null;
   const strip = (value: string) =>
     withoutUrls(value.replace(/[\w.+-]+@[\w.-]+/g, ' ').replace(/<[^>]+>/g, ' '))
+      // ICU syntax ("{count, plural, one {…} other {…}}") is code, not English text.
+      .replace(ICU_HEADER, ' ')
+      .replace(ICU_HEADER_TEST.test(value) ? /(?:^|[\s}])(?:zero|one|two|few|many|other|=\d+|[\w-]+)\s*(?=\{)/g : /$^/g, ' ')
       .replace(placeholderRe, ' ')
       .replace(/[(（][^)）]*[)）]/g, ' ')
       .replace(/["“„«「『‘'][^"”“»」』’']*["”“»」』’']/g, ' ');
@@ -523,7 +596,7 @@ function englishInNativeScript(lang: string, source: string, text: string, place
   const left = [
     ...new Set(
       (strip(text).match(/(?<![\p{L}-])[a-z]{4,}(?![\p{L}])/gu) ?? []).filter(
-        word => sourceWords.has(word) && !LATIN_LOANWORDS.has(word)
+        word => sourceWords.has(word) && !LATIN_LOANWORDS.has(word) && !allowed.has(word)
       )
     ),
   ];
@@ -554,9 +627,24 @@ const HEDGE_MARKERS: Record<string, RegExp> = {
   cs: /tendenc|obvykle|často|zpravidla|většinou|bývá|sklon|snadno|častěji|mív/iu,
   sk: /tendenc|obvykle|často|zvyčajne|väčšinou|býva|sklon|ľahko|častejšie|zvyk|skôr/iu,
   el: /τείν|συχνά|συνήθως|τάση|συνήθ|εύκολα|συχνότερα/iu,
-  fi: /taipu|usein|yleensä|tapaa|tavallisesti|tuppaa|tyypillisesti|taipumus|helposti|useimmiten|herkästi/iu,
+  fi: /taipu|tapana|usein|yleensä|tapaa|tavallisesti|tuppaa|tyypillisesti|taipumus|helposti|useimmiten|herkästi/iu,
   ca: /tendeix|tendència|sol|sovint|generalment|acostum|normalment|fàcilment|freqüent/iu,
 };
+
+// Chinese, Japanese and Korean need far fewer characters than English; Thai has no spaces.
+const COMPACT_SCRIPTS = new Set(['zh', 'ja', 'ko']);
+
+/**
+ * A translation with a fraction of the source's length lost content: cut off by the model, or
+ * the source grew after it was translated. Markup and placeholders are not counted.
+ */
+export function muchShorter(lang: string, source: string, text: string): string | null {
+  const visible = (value: string) => [...value.replace(/<[^>]+>|\{\{?[^{}]*\}?\}/g, '').replace(/\s+/g, ' ').trim()].length;
+  const [a, b] = [visible(source), visible(text)];
+  // Real translations from English rarely drop below 60% (Chinese/Japanese/Korean: 25%).
+  const min = COMPACT_SCRIPTS.has(baseLanguage(lang)) ? 0.2 : 0.5;
+  return a >= 200 && b < a * min ? `translation much shorter than the source (${b} of ${a} characters): content missing?` : null;
+}
 
 function droppedHedge(lang: string, source: string, text: string): boolean {
   const markers = HEDGE_MARKERS[baseLanguage(lang)];

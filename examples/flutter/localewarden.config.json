@@ -1,0 +1,8 @@
+{
+  "targetLanguages": ["de", "fr", "pl", "pt_BR", "ja"],
+  "files": "lib/l10n/app_{lang}.arb",
+  "context": "Plantly is a mobile app that reminds people when to water their houseplants.",
+  "doNotTranslate": ["Plantly"],
+  "formality": { "de": "informal", "fr": "formal", "pl": "informal" },
+  "termNotes": { "snooze": "postpone a reminder, not sleep" }
+}

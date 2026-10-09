@@ -7,7 +7,8 @@
 export const DEFAULT_PLACEHOLDER_PATTERNS = [
   '\\{\\{\\s*[\\w.-]+\\s*\\}\\}', // {{name}}       i18next, Handlebars, vue-i18n
   '\\{\\s*[\\w.-]+\\s*\\}', //        {name}         ICU, react-intl, i18next (custom)
-  '%(?:\\d+\\$)?[-+0#]*\\d*(?:\\.\\d+)?[sdifuxXeEgGc@]', // %s %d %1$s %.2f  printf, Android, iOS
+  // Not followed by a letter: Hungarian writes suffixes after percent signs ("100%-ig").
+  '%(?:\\d+\\$)?[-+0#]*\\d*(?:\\.\\d+)?[sdifuxXeEgGc@](?![A-Za-z\\u00C0-\\u024F])', // %s %d %1$s %.2f  printf, Android, iOS
   '%\\([\\w.-]+\\)[sdif]', //        %(name)s       Python
   '%\\{[\\w.-]+\\}', //               %{name}        Ruby, rails-i18n
   '\\$\\{[\\w.-]+\\}', //             ${name}        template literals

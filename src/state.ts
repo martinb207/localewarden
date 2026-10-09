@@ -14,7 +14,7 @@ import { hash, sortObject, today } from './util.js';
  *              value is not sent to the model again.
  */
 
-export type ReviewReason = 'manual-edit' | 'source-changed' | 'edited-after-approval';
+export type ReviewReason = 'manual-edit' | 'source-changed' | 'edited-after-approval' | 'approved-by-hand';
 
 export interface ReviewEntry {
   status: 'pending' | 'approved';

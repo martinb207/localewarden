@@ -5,7 +5,7 @@ import { ConfigError, CONFIG_FILE, loadConfig } from './config.js';
 import { CHECKS } from './checks.js';
 import { findSourceFiles } from './files.js';
 import { isReasoningModel } from './llm.js';
-import { checkProject, summaryTable } from './project.js';
+import { checkProject, fixPlaceholders, summaryTable } from './project.js';
 import { listReview, updateReview } from './review.js';
 import { run, type Logger } from './translate.js';
 
@@ -32,6 +32,7 @@ Check options:
   --limit <n>            findings shown per check with --verbose (default 20)
   --strict               exit 1 on warnings too (default: only placeholder/script errors)
   --json                 print findings as JSON
+  --fix                  repair placeholders with exactly one possible fix ({heures} -> {hours})
 
 Review options:
   --all                  include approved entries
@@ -100,6 +101,8 @@ const LAYOUTS = [
   'src/assets/i18n/{lang}.json',
   'i18n/{lang}.json',
   'lang/{lang}.json',
+  'lib/l10n/app_{lang}.arb',
+  'lib/l10n/intl_{lang}.arb',
 ];
 
 function init(): void {
@@ -188,7 +191,13 @@ async function translateCommand(args: Args): Promise<number> {
 function checkCommand(args: Args): number {
   const config = loadConfig(args.values.get('--config')?.[0]);
   const languages = languagesArg(args) ?? config.targetLanguages;
-  const findings = checkProject(config, languages);
+  let findings = checkProject(config, languages);
+  if (args.flags.has('--fix')) {
+    const fixed = fixPlaceholders(config, findings);
+    for (const f of fixed) console.log(`fixed [${f.lang}] ${f.file} ${f.key}: ${f.text}`);
+    console.log(`${fixed.length} placeholder(s) repaired.\n`);
+    if (fixed.length > 0) findings = checkProject(config, languages);
+  }
   if (args.flags.has('--json')) {
     console.log(JSON.stringify(findings, null, 2));
   } else {
@@ -205,7 +214,16 @@ function checkCommand(args: Args): number {
         if (items.length > limit) console.log(`  ... ${items.length - limit} more (--limit <n>)`);
       }
     }
-    const errors = findings.filter(f => f.severity === 'error').length;
+    // Errors fail CI, so show them even without --verbose.
+    const errorItems = findings.filter(f => f.severity === 'error');
+    if (!args.flags.has('--verbose') && errorItems.length > 0) {
+      console.log('\nErrors:');
+      for (const f of errorItems.slice(0, 20)) {
+        console.log(`  [${f.lang}] ${f.file} ${f.key} - ${f.check}${f.note ? `: ${f.note}` : ''}`);
+      }
+      if (errorItems.length > 20) console.log(`  ... ${errorItems.length - 20} more (--verbose)`);
+    }
+    const errors = errorItems.length;
     console.log(`\n${errors} error(s), ${findings.length - errors} warning(s).${findings.length && !args.flags.has('--verbose') ? ' Details: --verbose' : ''}`);
   }
   const errors = findings.some(f => f.severity === 'error');

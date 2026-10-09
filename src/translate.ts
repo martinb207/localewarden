@@ -1,15 +1,17 @@
 import path from 'node:path';
-import { Checker, FIXABLE_CHECKS, isUnchangedProse, type Issue } from './checks.js';
+import { Checker, FIXABLE_CHECKS, isUnchangedProse, muchShorter, type Issue } from './checks.js';
 import type { Config } from './config.js';
 import {
   buildTarget,
   detectFormat,
   findSourceFiles,
+  isArbMetadata,
   missingPluralLeaves,
   setAt,
   flatten,
+  parseDoc,
   readText,
-  serialize,
+  serializeDoc,
   stringLeaves,
   writeText,
   type JsonValue,
@@ -17,6 +19,7 @@ import {
 } from './files.js';
 import { BudgetExceededError, Client, FatalModelError, OpenAICompatibleModel, type Model } from './llm.js';
 import { batchPrompt, repairInstruction, singlePrompt, type PromptItem } from './prompt.js';
+import { Scope } from './scope.js';
 import { reviewId, State } from './state.js';
 import { baseLanguage, hash, inParallel, today } from './util.js';
 
@@ -76,6 +79,13 @@ export interface RunSummary {
 const SLOW_LANGUAGES = new Set(['ar', 'fa', 'ur', 'he', 'hi', 'mr', 'ne', 'bn', 'th', 'ta', 'te', 'kn', 'ml', 'gu', 'pa', 'si', 'my', 'km', 'lo', 'am', 'ka', 'hy']);
 const MAX_BATCH_CHARS = 6000;
 
+/** JSON with object keys sorted, to compare content regardless of key order and formatting. */
+function canonical(value: JsonValue): string {
+  return JSON.stringify(value, (_, v) =>
+    v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v
+  );
+}
+
 /** Words not shared by both texts, counted on the longer side (word-level LCS). */
 export function changedWords(before: string, after: string): number {
   const split = (text: string) => text.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).map(w => w.toLocaleLowerCase());
@@ -129,7 +139,8 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
     log.warn('"context" still has the example text from init; it is ignored. Describe your product in localewarden.config.json for better translations.');
     config = { ...config, context: undefined };
   }
-  const files = findSourceFiles(config.root, config.files, config.sourceLanguage);
+  const scope = new Scope(config);
+  const files = findSourceFiles(config.root, config.files, config.sourceLanguage).filter(file => !scope.isExcluded(file));
   if (files.length === 0) {
     throw new Error(`No ${config.sourceLanguage} files match "${config.files}" under ${config.root}.`);
   }
@@ -183,8 +194,8 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
   }
 
   /** Translates items in batches; returns key -> translation for the ones that passed. */
-  async function translateItems(lang: string, items: PromptItem[]): Promise<Map<string, string>> {
-    const results = new Map<string, string>();
+  async function translateItems(lang: string, items: PromptItem[]): Promise<Map<PromptItem, string>> {
+    const results = new Map<PromptItem, string>();
     const size = SLOW_LANGUAGES.has(baseLanguage(lang)) ? Math.min(5, config.batchSize) : config.batchSize;
     const batches: PromptItem[][] = [];
     let current: PromptItem[] = [];
@@ -250,18 +261,27 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
           log.warn(`[${lang}] ${item.key}: ${defect.hard}; not written`);
           continue;
         }
-        if (defect.soft) log.debug?.(`[${lang}] ${item.key}: ${defect.soft} (kept)`);
-        results.set(item.key, text);
+        const long = checker.tooLong(item.key, text);
+        if (long) log.warn(`[${lang}] ${item.key}: ${long}; written, shorten it by hand or run --fix-flagged`);
+        else if (defect.soft) log.debug?.(`[${lang}] ${item.key}: ${defect.soft} (kept)`);
+        results.set(item, text);
       }
     }
     return results;
   }
 
-  async function processFile(file: LocaleFile, sourceDoc: JsonValue, sourceText: string): Promise<void> {
-    const sourceLeaves = stringLeaves(sourceDoc);
+  interface SourceFile {
+    file: LocaleFile;
+    doc: JsonValue;
+    text: string;
+    leaves: ReturnType<typeof stringLeaves>;
+  }
 
-    await inParallel(languages, config.concurrency, async lang => {
-      if (stopped()) return;
+  /**
+   * Decides what to do with one file in one language: what to translate, revise or repair,
+   * what is protected and what was removed. Returns null when the file is skipped.
+   */
+  function planFile({ file, doc: sourceDoc, text: sourceText, leaves: sourceLeaves }: SourceFile, lang: string) {
       const counts = summary.languages[lang];
       const pluralExtras = missingPluralLeaves(sourceLeaves, lang);
       const leaves = [...sourceLeaves, ...pluralExtras];
@@ -270,16 +290,16 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
       const targetFile = path.join(config.root, targetRel);
       if (!path.resolve(targetFile).startsWith(path.resolve(config.root) + path.sep)) {
         log.error(`${targetRel} is outside the project; skipped.`);
-        return;
+        return null;
       }
       const targetText = readText(targetFile);
       let targetDoc: JsonValue | null = null;
       if (targetText !== null) {
         try {
-          targetDoc = JSON.parse(targetText) as JsonValue;
+          targetDoc = parseDoc(targetRel, targetText);
         } catch (error) {
           log.error(`${targetRel} is not valid JSON (${(error as Error).message}); skipped. Fix it by hand.`);
-          return;
+          return null;
         }
       }
       const current = targetDoc === null ? new Map<string, string>() : flatten(targetDoc);
@@ -296,6 +316,16 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
           values.set(key, source);
           continue;
         }
+        if (isArbMetadata(targetRel, key)) {
+          // Flutter ARB: "@@locale" names the target language; other metadata is copied.
+          values.set(key, key === '@@locale' ? lang : cur ?? source);
+          continue;
+        }
+        if (scope.isLiteral(key, source)) {
+          // Not text: keep a localized value someone set (e.g. a /de/ URL), else copy the source.
+          if (cur === undefined || cur.trim() === '') values.set(key, source);
+          continue;
+        }
         const hasValue = cur !== undefined && cur.trim() !== '';
 
         if (hasValue) {
@@ -304,7 +334,7 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
           const curHash = hash(cur);
           if (options.overwriteManual && (review || (entry && entry.value !== curHash))) {
             delete state.review[id];
-            fresh.push({ key, source });
+            fresh.push({ key, source, maxLength: scope.maxLength(key) });
             continue;
           }
           if (review) {
@@ -331,18 +361,21 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
         }
 
         if (!hasValue || options.retranslateAll) {
-          fresh.push({ key, source });
+          fresh.push({ key, source, maxLength: scope.maxLength(key) });
         } else if (!entry) {
           // First time localewarden sees this string: adopt an existing translation, unless
           // it is just the source text copied over.
-          if (isUnchangedProse(source, cur, checker.placeholderRe)) fresh.push({ key, source });
+          if (isUnchangedProse(source, cur, checker.placeholderRe)) fresh.push({ key, source, maxLength: scope.maxLength(key) });
           else state.set(lang, file.id, key, source, cur);
         } else if (entry.source !== sourceHash) {
-          revise.push({ key, source, previous: cur });
+          revise.push({ key, source, previous: cur, maxLength: scope.maxLength(key) });
         } else if (options.fixFlagged) {
           const issues = checker.checkString(lang, key, source, cur).filter(issue => FIXABLE_CHECKS.has(issue.check));
           const failed = state.repairFailures[reviewId(lang, file.id, key)];
-          if (issues.length > 0 && failed?.valueHash !== hash(cur)) repairs.push({ key, source, issues });
+          // Missing content needs more than a minimal correction: revise from the existing text.
+          if (failed?.valueHash === hash(cur)) continue; // this value could not be fixed before
+          if (muchShorter(lang, source, cur)) revise.push({ key, source, previous: cur, maxLength: scope.maxLength(key), completing: true });
+          else if (issues.length > 0) repairs.push({ key, source, issues });
         }
       }
 
@@ -354,24 +387,30 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
       }
 
       const work = [...fresh, ...revise];
-      if (dryRun) {
-        counts.planned += work.length + repairs.length;
-        counts.plannedChars += [...work, ...repairs].reduce((sum, item) => sum + item.source.length, 0);
-        counts.removed += removed.length;
-        if (work.length + repairs.length + removed.length > 0) {
-          log.info(
-            `[${lang}] ${targetRel}: ${fresh.length} new, ${revise.length} changed${repairs.length ? `, ${repairs.length} to repair` : ''}${removed.length ? `, ${removed.length} to remove` : ''}`
-          );
-        }
-        return;
+      if (work.length + repairs.length + removed.length > 0) {
+        log.info(
+          `[${lang}] ${targetRel}: ${fresh.length} new, ${revise.length} changed${repairs.length ? `, ${repairs.length} to repair` : ''}${removed.length ? `, ${removed.length} to remove` : ''}`
+        );
       }
+      return { file, lang, counts, sourceDoc, sourceText, targetRel, targetFile, targetText, targetDoc, values, work, repairs, removed, pluralExtras };
+  }
 
+  type Plan = NonNullable<ReturnType<typeof planFile>>;
+
+  /** Applies translations, runs repairs and writes the target file. */
+  async function finishPlan(plan: Plan, translated: Map<PromptItem, string>): Promise<void> {
+      const { file, lang, counts, sourceDoc, sourceText, targetRel, targetFile, targetText, targetDoc, values, work, repairs, removed, pluralExtras } = plan;
       if (work.length > 0) {
-        log.info(`[${lang}] ${targetRel}: translating ${fresh.length} new, ${revise.length} changed`);
-        const translated = await translateItems(lang, work);
         for (const item of work) {
-          const text = translated.get(item.key);
+          const text = translated.get(item);
           if (text === undefined) {
+            counts.failed++;
+            continue;
+          }
+          if (item.completing && item.previous && muchShorter(lang, item.source, text)) {
+            // Still missing content: keep the old text and do not spend tokens on it again.
+            state.repairFailures[reviewId(lang, file.id, item.key)] = { valueHash: hash(item.previous), date: today(), problems: ['content missing'], reason: 'revision still much shorter than the source', attempted: text };
+            log.warn(`[${lang}] ${item.key}: could not complete the missing content; listed in repair-failures.json`);
             counts.failed++;
             continue;
           }
@@ -386,7 +425,7 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
         if (stopped()) break;
         const before = values.get(key) ?? '';
         const problems = issues.map(issue => (issue.note ? `${issue.check}: ${issue.note}` : issue.check));
-        const after = await translateOne(lang, { key, source }, repairInstruction(before, problems));
+        const after = await translateOne(lang, { key, source, maxLength: scope.maxLength(key) }, repairInstruction(before, problems));
         const id = reviewId(lang, file.id, key);
         let reason: string | null = after === null ? 'no answer' : null;
         if (after !== null) {
@@ -416,30 +455,49 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
         const value = values.get(leaf.key);
         if (value !== undefined) setAt(built, leaf.path, value);
       }
-      const text = serialize(built, detectFormat(targetText ?? sourceText));
-      if (text !== targetText && !(targetText === null && Object.keys(built).length === 0)) {
+      // Same content as on disk (only formatting or key order differs): leave the file alone, so
+      // projects formatted with Prettier do not get a diff on every run.
+      const unchanged = targetDoc !== null && canonical(built) === canonical(targetDoc);
+      const text = serializeDoc(targetRel, built, detectFormat(targetText ?? sourceText));
+      if (!unchanged && text !== null && text !== targetText && !(targetText === null && Object.keys(built).length === 0)) {
         writeText(targetFile, text);
         summary.filesWritten.push(targetRel);
       }
-    });
+  }
+
+  const sources: SourceFile[] = [];
+  for (const file of files) {
+    const sourceRel = file.pathFor(config.sourceLanguage);
+    const text = readText(path.join(config.root, sourceRel));
+    if (text === null) continue;
+    try {
+      const doc = parseDoc(sourceRel, text);
+      sources.push({ file, doc, text, leaves: stringLeaves(doc) });
+    } catch (error) {
+      log.error(`${sourceRel} is not valid JSON (${(error as Error).message}); skipped.`);
+    }
   }
 
   try {
-    for (const file of files) {
-      if (stopped()) break;
-      const sourceRel = file.pathFor(config.sourceLanguage);
-      const sourceText = readText(path.join(config.root, sourceRel));
-      if (sourceText === null) continue;
-      let sourceDoc: JsonValue;
-      try {
-        sourceDoc = JSON.parse(sourceText) as JsonValue;
-      } catch (error) {
-        log.error(`${sourceRel} is not valid JSON (${(error as Error).message}); skipped.`);
-        continue;
+    // Per language: plan every file, translate all their strings in shared batches (many
+    // small files, e.g. store listings, do not cost a request each), then write each file.
+    await inParallel(languages, config.concurrency, async lang => {
+      if (stopped()) return;
+      const plans = sources.map(source => planFile(source, lang)).filter((plan): plan is Plan => plan !== null);
+      const counts = summary.languages[lang];
+      if (dryRun) {
+        for (const plan of plans) {
+          counts.planned += plan.work.length + plan.repairs.length;
+          counts.plannedChars += [...plan.work, ...plan.repairs].reduce((sum, item) => sum + item.source.length, 0);
+          counts.removed += plan.removed.length;
+        }
+        return;
       }
-      await processFile(file, sourceDoc, sourceText);
-      if (!dryRun) state.save();
-    }
+      const work = plans.flatMap(plan => plan.work);
+      const translated = work.length > 0 ? await translateItems(lang, work) : new Map<PromptItem, string>();
+      for (const plan of plans) await finishPlan(plan, translated);
+      state.save();
+    });
   } finally {
     if (!dryRun) state.save();
   }

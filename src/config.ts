@@ -28,6 +28,16 @@ export interface Config {
   termNotes: Record<string, string>;
   /** Extra instructions per language; "*" applies to every language. */
   instructions: Record<string, string>;
+  /**
+   * Keys whose values are not text (ids, types, image paths). Copied from the source, never
+   * translated. "*" matches within one key segment, "**" across segments; a pattern without
+   * a dot matches the last segment anywhere ("id" matches "steps.2.id").
+   */
+  ignoreKeys: string[];
+  /** Source files to skip, as path patterns relative to the config ("locales/{lang}/nav.json"). */
+  exclude: string[];
+  /** Maximum characters per key pattern: { "**.meta.title": 60 }. Told to the model and checked. */
+  maxLength: Record<string, number>;
   /** Regular expressions (as strings) that match placeholders. Replaces the built-in list. */
   placeholders?: string[];
   model: string;
@@ -61,6 +71,9 @@ export const DEFAULTS: Omit<Config, 'targetLanguages' | 'files' | 'root'> = {
   glossary: {},
   termNotes: {},
   instructions: {},
+  ignoreKeys: [],
+  exclude: [],
+  maxLength: {},
   model: 'gpt-5.4-mini',
   baseUrl: 'https://api.openai.com/v1',
   apiKeyEnv: 'OPENAI_API_KEY',
@@ -122,6 +135,18 @@ export function resolveConfig(raw: unknown, root: string): Config {
     !Object.values(config.glossary).every(isStringRecord)
   ) {
     fail('"glossary" must map languages to { "source term": "required rendering" } objects.');
+  }
+  for (const key of ['ignoreKeys', 'exclude'] as const) {
+    if (!Array.isArray(config[key]) || !config[key].every(p => typeof p === 'string' && p !== '')) {
+      fail(`"${key}" must be a list of patterns.`);
+    }
+  }
+  if (
+    !config.maxLength ||
+    typeof config.maxLength !== 'object' ||
+    !Object.values(config.maxLength).every(n => Number.isInteger(n) && n > 0)
+  ) {
+    fail('"maxLength" must map key patterns to positive whole numbers, e.g. { "**.meta.title": 60 }.');
   }
   if (!isStringRecord(config.termNotes)) fail('"termNotes" must map terms to explanations.');
   if (!isStringRecord(config.instructions)) fail('"instructions" must map languages to text.');

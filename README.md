@@ -11,7 +11,7 @@ npx localewarden             # translate new and changed strings
 npx localewarden check       # quality check, no API calls (use it in CI)
 ```
 
-Works with i18next, react-intl / FormatJS, vue-i18n, next-intl, ngx-translate and any other setup that keeps strings in JSON files. Uses any OpenAI-compatible API (OpenAI, OpenRouter, a local Ollama, ...).
+Works with i18next, react-intl / FormatJS, vue-i18n, next-intl, ngx-translate and any other setup that keeps strings in JSON files, with Flutter (`.arb` files) and with fastlane's App Store / Play Store metadata (`.txt` files). Uses any OpenAI-compatible API (OpenAI, OpenRouter, a local Ollama, ...).
 
 ## Why
 
@@ -22,15 +22,22 @@ Translating locale files with a language model is easy once. Keeping 20 language
 - **Models are inconsistent across batches.** French screens mix "tu" and "vous", Spanish copies English Title Case ("Configure Su Cuenta"), and Polish or Russian address every user as a man.
 - **Broken output ships silently.** A translated placeholder (`{heures}` instead of `{hours}`) shows raw braces in your app. A dropped `</strong>` breaks the layout. Stray Cyrillic letters end up in a Danish sentence.
 
-localewarden grew out of the translation pipeline of a production app that ships in 38 languages. Every rule and check in it exists because one of these failures happened in real output.
+localewarden grew out of the translation pipeline of a production app that ships in 38 languages. Every rule and check in it exists because one of these failures happened in real output. The checks are tuned against that app's real texts (UI, website, long-form learning content and store listings, about 165 MB) to report problems without flooding you with false alarms. On those texts they still find things that slipped through earlier pipelines: sections cut off after the English grew, stray letters from other alphabets, a trial notice left in English.
+
+## How it compares
+
+- **Translation platforms** (Crowdin, Lokalise, Phrase, Weblate) are hosted services with editors, translator workflows and review for teams. localewarden is a small CLI that runs in your repository and CI, with no account and no server. If you have professional translators, a platform fits better. If a model translates and people only fix the odd string, this is the lighter setup.
+- **"Translate my JSON with GPT" scripts** usually send every string on every run and overwrite whatever is there. localewarden keeps state, so it only sends what changed, keeps human fixes, and checks the output.
+- **Editor extensions** (such as i18n Ally) help you write and look up keys while coding. localewarden is about filling and maintaining 10 to 40 languages afterwards. The two work well together.
 
 ## What it does
 
 - **Translates only what changed.** It remembers a hash of each source string per language. New strings are translated. Changed strings are *revised*: the model gets the existing translation and changes only what the source change requires. Removed strings are deleted from every language.
 - **Protects hand edits.** If someone edited a translation, localewarden detects it, keeps it, and lists it for review. If the source of a hand-edited string changes later, the string is flagged instead of overwritten.
-- **Checks every result before writing it.** Broken placeholders, injected HTML or scripts, foreign alphabets, changed links, broken HTML and echoed source text are rejected (retried once, then left for the next run). Softer problems are retried and reported.
+- **Checks every result before writing it.** Broken placeholders, injected HTML or scripts, foreign alphabets, changed links, broken HTML and echoed source text are rejected (retried once, then left for the next run). Softer problems (too long, content missing, words left in English) are retried and reported.
 - **Consistent style per language.** It enforces formal or informal address per language (`du`/`Sie`, `tu`/`vous`, `ты`/`вы` and 16 more), uses sentence case where the language does, avoids gendered forms for "you", and applies local typography (French spacing, `92 %` in German, CJK quotation marks).
 - **Plural forms per language.** For i18next-style keys (`item_one`, `item_other`) it adds the forms a language needs but English lacks, such as Polish `_few` and `_many` or Arabic `_zero`, `_two`, `_few` and `_many` (CLDR plural rules).
+- **Data files and store listings.** Fields like `id`, `type` or `image` are copied instead of translated (`ignoreKeys`), and so are URLs, email addresses and file paths. Length limits per key (`maxLength`) are passed to the model and checked: App Store names, SEO titles, buttons.
 - **Glossary and protected names.** You choose fixed renderings ("Privacy Policy" -> "Politique de confidentialité") and names that must never be translated. The check accepts grammatical case endings.
 - **Quality check for CI.** `localewarden check` runs all checks without any API calls and exits non-zero on errors.
 - **Targeted repair.** `--fix-flagged` asks the model to fix only what the check flagged. The fix is accepted only if the problem is gone and little else changed.
@@ -79,7 +86,7 @@ es  Mantén vivas tus plantas sin tener que pensar en ello
 ja  何も考えなくても、植物を元気に保てます
 ```
 
-German uses "du" and French "vous", as configured. Spanish and French use sentence case, not the English Title Case. French has its space before "!". The hedge "tend to" survived, and so did the placeholders, the link and the brand name. The full example is in [`examples/basic`](examples/basic).
+German uses "du" and French "vous", as configured. Spanish and French use sentence case, not the English Title Case. French has its space before "!". The hedge "tend to" survived, and so did the placeholders, the link and the brand name. The full example is in [`examples/basic`](examples/basic). There are also examples for [Flutter ARB files](examples/flutter) and [App Store / Play Store texts with fastlane](examples/fastlane).
 
 ## Quick start
 
@@ -135,24 +142,28 @@ The same checks run in two places. Right after each model answer, a failed hard 
 | --- | --- | --- |
 | `placeholder` | `{name}`, `{{count}}`, `%s`, `%1$d`, `%{x}`, `${x}`, `<0></0>` renamed, translated, added or dropped. ICU `plural`/`select` arguments are compared, while plural categories may differ per language. | error |
 | `unsafe` | HTML tags, attributes, event handlers or `javascript:`/`data:` URLs that the source does not have. Translations are often rendered as raw HTML, so this would be a script injection. | error |
-| `script` | Letters from an alphabet the language does not use ("刺激" in German), or a word that mixes Latin with Cyrillic/Greek lookalikes ("Вarda") | error |
+| `script` | Letters from an alphabet the language does not use ("刺激" in German), a word that mixes Latin with Cyrillic/Greek lookalikes ("Вarda"), or Simplified characters in Traditional Chinese (`zh-TW`) and the reverse | error |
 | `markup` | Changed link targets, different number of tags, unclosed or misnested tags, dropped list items | warning (broken tags and changed links: never written) |
 | `years` | A year from the source missing or changed (citations, dates) | warning |
 | `formality` | The other form of address than configured, both forms in one string, or masculine-only forms for "you" | warning |
+| `length` | Longer than the `maxLength` configured for the key | warning |
 | `titlecase` | English Title Case copied into a language that uses sentence case | warning |
 | `ampersand` | "&" in languages that write the word | warning |
 | `glossary` | A glossary rendering missing (case endings allowed), or a `doNotTranslate` name translated | warning |
 | `untranslated` | Identical to the source (prose of 3+ words; "OK" and names are fine) | warning |
-| `partial` | Source-language words left inside the translation, an untranslated bold lead-in, or a hedge that became certainty ("tend to" stated as fact) | warning |
+| `partial` | Source-language words left inside the translation, an untranslated bold lead-in, a hedge that became certainty ("tend to" stated as fact), a translation much shorter than its source (content cut off, or the source grew after it was translated), or sibling options that got the same translation although the source differs ("Rarely" and "Occasionally" both "Selten") | warning |
 
 ```bash
 npx localewarden check              # counts per language and check
 npx localewarden check -v           # with examples
 npx localewarden check --strict     # exit 1 on warnings too
 npx localewarden check --json       # for scripts
+npx localewarden check --fix        # repair placeholders with one possible fix, no API calls
 ```
 
-Approved hand edits are skipped, except for errors (placeholder, unsafe, script), which break the app either way.
+`--fix` repairs a translated placeholder when the source has exactly one and the translation renamed it (`{stunden}` back to `{hours}`). The file is edited in place, so its formatting stays as it is. Anything less certain is left for `--fix-flagged` or a person.
+
+Approved strings are skipped, except for errors (placeholder, unsafe, script), which break the app either way. You can approve any string, not only hand edits: `npx localewarden review --approve de:home.title` tells the check that a person looked at it (for example a pun on a brand name that is correct without the name), and runs leave it alone.
 
 ### In CI
 
@@ -240,6 +251,9 @@ npx localewarden review --release de:home.title   # hand it back: next run revis
 | `glossary` | `{}` | `{"fr": {"Terms of Service": "Conditions d'utilisation"}}` |
 | `termNotes` | `{}` | Meanings of ambiguous terms, sent only with strings that contain them: `{"snooze": "postpone a reminder"}` |
 | `instructions` | `{}` | Extra instructions per language, `"*"` for all: `{"es": "Use neutral Latin American Spanish."}` |
+| `ignoreKeys` | `[]` | Keys that are not text, copied from the source: `["id", "type", "**.sources.*"]`. `*` matches within a key segment, `**` across segments; a pattern without a dot matches the last segment anywhere. URLs, emails, file paths and numbers are always copied. |
+| `exclude` | `[]` | Source files to skip: `["locales/{lang}/nav.json"]` |
+| `maxLength` | `{}` | Character limits per key pattern: `{"**.meta.title": 60, "name": 30}`. The model is told the limit; longer results are retried once and reported by the `length` check. |
 | `placeholders` | built-in | Regular expressions (strings) that match your placeholders. Replaces the built-in list. |
 | `model` | `"gpt-5.4-mini"` | Any chat model your endpoint offers |
 | `baseUrl` | `"https://api.openai.com/v1"` | Any OpenAI-compatible endpoint |
@@ -250,6 +264,37 @@ npx localewarden review --release de:home.title   # hand it back: next run revis
 | `concurrency` | `4` | Languages translated in parallel |
 | `batchSize` | `20` | Strings per request (smaller for scripts that need many tokens) |
 | `stateDir` | `".localewarden"` | Where state and the review list live |
+
+### App Store and Play Store listings (fastlane)
+
+```json
+{
+  "sourceLanguage": "en-US",
+  "targetLanguages": ["de-DE", "fr-FR", "ja"],
+  "files": "fastlane/metadata/{lang}/*.txt",
+  "exclude": ["fastlane/metadata/{lang}/*_url.txt"],
+  "maxLength": { "name": 30, "subtitle": 30, "keywords": 100, "promotional_text": 170, "description": 4000 },
+  "termNotes": { "keywords": "a comma-separated keyword list for store search, not a sentence" }
+}
+```
+
+Each `.txt` file is one string, keyed by its file name, so the limits above apply to `name.txt`, `subtitle.txt` and so on.
+
+### Flutter (ARB)
+
+```json
+{ "files": "lib/l10n/app_{lang}.arb", "targetLanguages": ["de", "fr", "pt_BR"] }
+```
+
+Metadata (`@@locale`, `@key` descriptions and placeholders) is copied, not translated, and `@@locale` is set to the target language. ICU plurals and selects keep their structure, and each language gets the plural categories it needs.
+
+### Data files
+
+For content JSON with ids, types and links, list the non-text keys:
+
+```json
+{ "files": "content/**/*.{lang}.json", "ignoreKeys": ["id", "type", "category", "image", "**.sources.*"] }
+```
 
 ### Other providers
 
@@ -268,7 +313,7 @@ Small local models make noticeably more mistakes. The checks catch the mechanica
 ```text
 localewarden [translate]  --dry-run --lang de,fr --fix-flagged --retranslate-all
                           --overwrite-manual --max-tokens <n> --verbose
-localewarden check        --lang de,fr --verbose --limit <n> --strict --json
+localewarden check        --lang de,fr --verbose --limit <n> --strict --json --fix
 localewarden review       --all --approve <sel>... --release <sel>...
 localewarden init
 Global: --config <path>  --help  --version
@@ -300,7 +345,7 @@ Translations are treated as untrusted: any markup the source does not have is bl
 
 ## Limitations
 
-- JSON only (nested objects, arrays, flat keys). YAML, PO, XLIFF and ARB are not supported yet.
+- JSON (nested objects, arrays, flat keys), Flutter ARB and plain `.txt` files. YAML, PO and XLIFF are not supported yet.
 - The checks catch mechanical problems, not every wrong meaning. Have a native speaker look at important screens, then approve their edits with `review`.
 - Rules for form of address, gender and typography exist for the languages listed above. Other languages are translated with the general rules.
 - A run that is interrupted keeps everything written so far. Unwritten strings are picked up on the next run.

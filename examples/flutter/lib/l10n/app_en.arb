@@ -1,0 +1,15 @@
+{
+  "@@locale": "en",
+  "appTitle": "Plantly",
+  "greeting": "Good morning, {name}",
+  "@greeting": {
+    "description": "Greeting at the top of the home screen",
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "plantsDue": "{count, plural, =0 {No plants need water today} one {{count} plant needs water today} other {{count} plants need water today}}",
+  "@plantsDue": {
+    "description": "Summary on the home screen",
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "snooze": "Remind Me Tomorrow"
+}

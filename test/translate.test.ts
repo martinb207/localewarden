@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { run, tooManyChanges } from '../src/translate.js';
 import { listReview, updateReview } from '../src/review.js';
+import { checkProject, fixPlaceholders } from '../src/project.js';
 import { fakeModel, readJson, silent, tempProject, writeJson } from './helpers.js';
 
 describe('run', () => {
@@ -19,6 +20,14 @@ describe('run', () => {
     });
     expect(summary.languages.de.translated).toBe(4);
     expect(fs.existsSync(path.join(config.root, '.localewarden/state.json'))).toBe(true);
+  });
+
+  it('does not rewrite a file whose content is unchanged (Prettier formatting is kept)', async () => {
+    const pretty = '{\n  "b": "[de] Second",\n  "a": ["[de] One", "[de] Two"]\n}\n';
+    const config = tempProject({ 'locales/en.json': { a: ['One', 'Two'], b: 'Second' }, 'locales/de.json': pretty });
+    const summary = await run(config, { model: fakeModel().model, logger: silent });
+    expect(summary.filesWritten).toEqual([]);
+    expect(fs.readFileSync(path.join(config.root, 'locales/de.json'), 'utf8')).toBe(pretty);
   });
 
   it('makes no API calls when nothing changed', async () => {
@@ -205,6 +214,174 @@ describe('run', () => {
     const again = fakeModel();
     await run(config, { model: again.model, logger: silent });
     expect(again.calls).toHaveLength(0);
+  });
+
+  it('copies ignored keys and non-text values instead of translating them', async () => {
+    const config = tempProject(
+      {
+        'locales/en.json': {
+          id: 'sleep-basics',
+          type: 'article',
+          title: 'Sleep basics',
+          image: 'images/sleep.png',
+          link: 'https://example.com/sleep',
+          steps: [{ id: 'step-1', text: 'Go to bed earlier' }],
+        },
+      },
+      { ignoreKeys: ['id', 'type'] }
+    );
+    const { model, calls } = fakeModel();
+    await run(config, { model, logger: silent });
+    expect(readJson(config, 'locales/de.json')).toEqual({
+      id: 'sleep-basics',
+      type: 'article',
+      title: '[de] Sleep basics',
+      image: 'images/sleep.png',
+      link: 'https://example.com/sleep',
+      steps: [{ id: 'step-1', text: '[de] Go to bed earlier' }],
+    });
+    expect(JSON.parse(calls[0].user)).toEqual(['Sleep basics', 'Go to bed earlier']);
+  });
+
+  it('keeps a localized URL someone set', async () => {
+    const config = tempProject({ 'locales/en.json': { link: 'https://example.com/privacy' }, 'locales/de.json': { link: 'https://example.com/de/datenschutz' } });
+    await run(config, { model: fakeModel().model, logger: silent });
+    expect(readJson(config, 'locales/de.json').link).toBe('https://example.com/de/datenschutz');
+  });
+
+  it('translates the strings of several files in one request per language', async () => {
+    const config = tempProject(
+      { 'locales/en/a.json': { x: 'First file text' }, 'locales/en/b.json': { x: 'Second file text' }, 'locales/en/c.json': { x: 'Third file text' } },
+      { files: 'locales/{lang}/*.json' }
+    );
+    const { model, calls } = fakeModel();
+    await run(config, { model, logger: silent });
+    expect(calls).toHaveLength(1);
+    expect(readJson(config, 'locales/de/b.json')).toEqual({ x: '[de] Second file text' });
+  });
+
+  it('skips excluded files', async () => {
+    const config = tempProject(
+      { 'locales/en/common.json': { a: 'Hello there' }, 'locales/en/nav.json': { b: 'Home' } },
+      { files: 'locales/{lang}/*.json', exclude: ['locales/{lang}/nav.json'] }
+    );
+    await run(config, { model: fakeModel().model, logger: silent });
+    expect(fs.existsSync(path.join(config.root, 'locales/de/common.json'))).toBe(true);
+    expect(fs.existsSync(path.join(config.root, 'locales/de/nav.json'))).toBe(false);
+  });
+
+  it('tells the model the length limit and retries a translation that is too long', async () => {
+    const config = tempProject(
+      { 'locales/en.json': { meta: { title: 'Sleep better tonight' }, body: 'Some longer body text here' } },
+      { maxLength: { '**.title': 25 } }
+    );
+    const { model, calls } = fakeModel((text, system) => (system.includes('JSON array') && text.includes('Sleep') ? `${text} with far too many extra words` : text));
+    await run(config, { model, logger: silent });
+    expect(calls[0].system).toContain('element 1 at most 25');
+    expect(calls).toHaveLength(2);
+    expect(calls[1].system).toContain('at most 25 characters');
+    expect(readJson(config, 'locales/de.json').meta.title).toBe('[de] Sleep better tonight');
+  });
+
+  it('translates fastlane metadata .txt files', async () => {
+    const config = tempProject(
+      {
+        'fastlane/metadata/en-US/name.txt': 'Plantly\n',
+        'fastlane/metadata/en-US/subtitle.txt': 'Water reminders for your plants\n',
+        'fastlane/metadata/en-US/support_url.txt': 'https://example.com/support\n',
+      },
+      { files: 'fastlane/metadata/{lang}/*.txt', sourceLanguage: 'en-US', targetLanguages: ['de-DE'], doNotTranslate: ['Plantly'], maxLength: { subtitle: 30, name: 30 } }
+    );
+    const { model, calls } = fakeModel();
+    await run(config, { model, logger: silent });
+    const read = (f: string) => fs.readFileSync(path.join(config.root, 'fastlane/metadata/de-DE', f), 'utf8');
+    expect(read('subtitle.txt')).toBe('[de-DE] Water reminders for your plants\n');
+    expect(read('support_url.txt')).toBe('https://example.com/support\n');
+    expect(calls.some(c => c.system.includes('German (Germany)'))).toBe(true);
+    expect(calls.some(c => /at most 30/.test(c.system))).toBe(true);
+    const again = fakeModel();
+    await run(config, { model: again.model, logger: silent });
+    expect(again.calls).toHaveLength(0);
+  });
+
+  it('approves any string so the check stops reporting it and runs leave it alone', async () => {
+    const config = tempProject(
+      { 'locales/en.json': { pun: 'Weekend Restly' }, 'locales/de.json': { pun: 'Wochenende ohne Bildschirm' } },
+      { doNotTranslate: ['Restly'] }
+    );
+    await run(config, { model: fakeModel().model, logger: silent });
+    expect(checkProject(config).some(f => f.key === 'pun' && f.check === 'glossary')).toBe(true);
+    expect(updateReview(config, 'approve', ['de:pun'])).toBe(1);
+    expect(checkProject(config).some(f => f.key === 'pun')).toBe(false);
+    const { model, calls } = fakeModel();
+    await run(config, { model, logger: silent, retranslateAll: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports sibling options that became indistinguishable', () => {
+    const config = tempProject({
+      'locales/en.json': { scale: { rarely: 'Rarely', sometimes: 'Occasionally', often: 'Often' }, item_one: 'One item', item_other: 'Items' },
+      'locales/de.json': { scale: { rarely: 'Selten', sometimes: 'Selten', often: 'Oft' }, item_one: 'Elemente', item_other: 'Elemente' },
+    });
+    const findings = checkProject(config).filter(f => f.check === 'partial');
+    expect(findings.map(f => f.key)).toEqual(['scale.sometimes']);
+  });
+
+  it('completes a translation that lost most of its content with --fix-flagged', async () => {
+    const long = 'Pick one recurring moment that often creates tension at home. '.repeat(5);
+    const config = tempProject({ 'locales/en.json': { a: long }, 'locales/de.json': { a: 'Wähle einen Moment.' } });
+    await run(config, { model: fakeModel().model, logger: silent });
+    const { model, calls } = fakeModel();
+    const summary = await run(config, { model, logger: silent, fixFlagged: true });
+    expect(summary.languages.de.revised).toBe(1);
+    expect(calls[0].system).toContain('Wähle einen Moment.');
+    expect(readJson(config, 'locales/de.json').a).toBe(`[de] ${long}`.trim());
+  });
+
+  it('does not retry a completion that failed before', async () => {
+    const long = 'Pick one recurring moment that often creates tension at home. '.repeat(5);
+    const config = tempProject({ 'locales/en.json': { a: long }, 'locales/de.json': { a: 'Wähle einen Moment.' } });
+    await run(config, { model: fakeModel().model, logger: silent });
+    const first = fakeModel(() => 'Wähle einen Moment, bitte.');
+    const summary = await run(config, { model: first.model, logger: silent, fixFlagged: true });
+    expect(summary.languages.de.failed).toBe(1);
+    expect(readJson(config, 'locales/de.json').a).toBe('Wähle einen Moment.');
+    const second = fakeModel();
+    await run(config, { model: second.model, logger: silent, fixFlagged: true });
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('translates Flutter ARB files and keeps their metadata', async () => {
+    const config = tempProject(
+      {
+        'lib/l10n/app_en.arb': {
+          '@@locale': 'en',
+          title: 'Hello {name}',
+          '@title': { description: 'Greeting on the home screen', placeholders: { name: { type: 'String' } } },
+          items: '{count, plural, one {# item} other {# items}}',
+        },
+      },
+      { files: 'lib/l10n/app_{lang}.arb', targetLanguages: ['de', 'pt_BR'] }
+    );
+    const { model, calls } = fakeModel();
+    await run(config, { model, logger: silent });
+    const de = readJson(config, 'lib/l10n/app_de.arb');
+    expect(de['@@locale']).toBe('de');
+    expect(de.title).toBe('[de] Hello {name}');
+    expect(de['@title']).toEqual({ description: 'Greeting on the home screen', placeholders: { name: { type: 'String' } } });
+    expect(readJson(config, 'lib/l10n/app_pt_BR.arb')['@@locale']).toBe('pt_BR');
+    expect(calls.every(c => !c.user.includes('Greeting on the home screen'))).toBe(true);
+    expect(checkProject(config)).toEqual([]);
+  });
+
+  it('repairs a renamed placeholder without the model and keeps the formatting', () => {
+    const config = tempProject({
+      'locales/en.json': { a: 'You have {hours} left', b: '{x} and {y}' },
+      'locales/de.json': '{\n    "a": "Du hast noch {stunden}",\n    "b": "{x} und {z}"\n}\n',
+    });
+    const fixed = fixPlaceholders(config, checkProject(config));
+    expect(fixed.map(f => f.key)).toEqual(['a']);
+    expect(fs.readFileSync(path.join(config.root, 'locales/de.json'), 'utf8')).toBe('{\n    "a": "Du hast noch {hours}",\n    "b": "{x} und {z}"\n}\n');
   });
 
   it('limits how much a targeted repair may change', () => {
