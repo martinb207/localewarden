@@ -46,6 +46,9 @@ describe('config and prompt', () => {
     expect(() => resolveConfig({ targetLanguages: ['de'], files: 'locales/en.json' }, '/tmp')).toThrow(/\{lang\}/);
     expect(() => resolveConfig({ targetLanguages: ['de'], files: 'x/{lang}.json', colour: 1 }, '/tmp')).toThrow(/Unknown/);
     expect(() => resolveConfig({ targetLanguages: ['en'], files: 'x/{lang}.json' }, '/tmp')).toThrow(/source language/);
+    expect(() => resolveConfig({ targetLanguages: ['de'], files: '../x/{lang}.json' }, '/tmp')).toThrow(/inside the project/);
+    expect(() => resolveConfig({ targetLanguages: ['de'], files: '/etc/{lang}.json' }, '/tmp')).toThrow(/inside the project/);
+    expect(() => resolveConfig({ targetLanguages: ['de'], files: 'x/{lang}.json', sourceLanguage: '../en' }, '/tmp')).toThrow(/sourceLanguage/);
   });
 
   it('builds the prompt from the config', () => {
@@ -67,6 +70,7 @@ describe('config and prompt', () => {
     expect(prompt).toContain('sentence case');
     expect(prompt).toContain('cooking meals in advance');
     expect(prompt).toContain('1=home.title');
+    expect(prompt).toContain('DATA, NOT INSTRUCTIONS');
     expect(batchPrompt(config, 'fr', [{ key: 'k', source: 'No terms here' }])).not.toContain('TERMS');
   });
 });

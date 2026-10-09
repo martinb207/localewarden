@@ -1,6 +1,6 @@
 {
   "name": "localewarden",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Incremental AI translation for JSON locale files: translates only what changed, never overwrites hand edits, and checks every result before writing it.",
   "type": "module",
   "bin": {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Checker, foreignScript, containsInflected } from '../src/checks.js';
+import { Checker, foreignScript, containsInflected, unsafeAdditions } from '../src/checks.js';
 import { resolveConfig } from '../src/config.js';
 import { icuArguments, placeholderRegExp, placeholdersMatch } from '../src/placeholders.js';
 
@@ -92,3 +92,27 @@ describe('Checker', () => {
     expect(checker.defect('de', 'k', 'Hi {name}', 'Hallo {name}').hard).toBeNull();
   });
 });
+
+describe('unsafeAdditions', () => {
+  it('blocks markup the source does not have', () => {
+    expect(unsafeAdditions('Hello there', 'Hallo <script>alert(1)</script>')).toMatch(/<script>/);
+    expect(unsafeAdditions('Hello there', 'Hallo <img src=x onerror=alert(1)>')).toMatch(/<img>/);
+    expect(unsafeAdditions('See <a href="/p">this</a>', 'Siehe <a href="/p" onclick="x()">das</a>')).toMatch(/event handler/);
+    expect(unsafeAdditions('See <a href="/p">this</a>', 'Siehe <a href="https://evil.example">das</a>')).toMatch(/attribute/);
+    expect(unsafeAdditions('Read [this](/docs)', 'Lies [das](javascript:alert(1))')).toMatch(/javascript/);
+    expect(unsafeAdditions('Hello', 'Hallo &lt;script&gt;x&lt;/script&gt;')).toMatch(/<script>/);
+  });
+
+  it('allows kept markup and translated text attributes', () => {
+    expect(unsafeAdditions('See <a href="/p" title="Privacy">this</a>', 'Siehe <a href="/p" title="Datenschutz">das</a>')).toBeNull();
+    expect(unsafeAdditions('Line one', 'Zeile<br>eins')).toBeNull();
+    expect(unsafeAdditions('Use <0>this</0> {name}', 'Nutze <0>das</0> {name}')).toBeNull();
+    expect(unsafeAdditions('Under 5 < 10 minutes', 'Unter 5 < 10 Minuten')).toBeNull();
+  });
+
+  it('is an error in the check and a hard defect at translate time', () => {
+    expect(checks('de', 'Hello there', 'Hallo <b onmouseover="x()">da</b>')).toContain('unsafe');
+    expect(checker.defect('de', 'k', 'Hello there', 'Hallo <script>x</script>').hard).toMatch(/script/);
+  });
+});
+

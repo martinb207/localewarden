@@ -162,6 +162,56 @@ export function buildTarget(source: JsonValue, values: Map<string, string>, pref
   return source;
 }
 
+/**
+ * i18next plural forms the target language needs but the source lacks. English has
+ * "item_one" and "item_other"; Polish also needs "item_few" and "item_many", Arabic six forms.
+ * Each missing form is translated from the source's "_other" text.
+ */
+export function missingPluralLeaves(leaves: Leaf[], lang: string): Leaf[] {
+  let categories: string[];
+  try {
+    categories = new Intl.PluralRules(lang.replace('_', '-')).resolvedOptions().pluralCategories;
+  } catch {
+    return [];
+  }
+  const keys = new Set(leaves.map(leaf => leaf.key));
+  const extra: Leaf[] = [];
+  for (const leaf of leaves) {
+    const last = leaf.path[leaf.path.length - 1];
+    if (typeof last !== 'string' || !last.endsWith('_other')) continue;
+    const stem = last.slice(0, -'_other'.length);
+    const parent = leaf.path.slice(0, -1);
+    for (const category of categories) {
+      const segments = [...parent, `${stem}_${category}`];
+      const key = keyOf(segments);
+      if (!keys.has(key)) extra.push({ path: segments, key, value: leaf.value });
+    }
+  }
+  return extra;
+}
+
+/** Sets `value` at `segments`, creating objects on the way. Only for object paths. */
+export function setAt(doc: JsonValue, segments: PathSegment[], value: string): void {
+  let node = doc as { [key: string]: JsonValue };
+  for (const segment of segments.slice(0, -1)) {
+    const next = node[segment as string];
+    if (!next || typeof next !== 'object' || Array.isArray(next)) return;
+    node = next as { [key: string]: JsonValue };
+  }
+  const key = segments[segments.length - 1] as string;
+  if (key in node) {
+    node[key] = value;
+    return;
+  }
+  // Insert after the last sibling with the same stem ("item_one", "item_other" -> "item_few").
+  const stem = key.replace(/_[a-z]+$/, '_');
+  const entries = Object.entries(node);
+  const after = entries.map(([k]) => k.startsWith(stem)).lastIndexOf(true);
+  entries.splice(after === -1 ? entries.length : after + 1, 0, [key, value]);
+  for (const k of Object.keys(node)) delete node[k];
+  Object.assign(node, Object.fromEntries(entries));
+}
+
 export interface JsonFormat {
   indent: string;
   finalNewline: boolean;

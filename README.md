@@ -1,5 +1,7 @@
 # localewarden
 
+[![npm](https://img.shields.io/npm/v/localewarden)](https://www.npmjs.com/package/localewarden) [![CI](https://github.com/martinb207/localewarden/actions/workflows/ci.yml/badge.svg)](https://github.com/martinb207/localewarden/actions/workflows/ci.yml) [![license](https://img.shields.io/npm/l/localewarden)](LICENSE)
+
 **Incremental AI translation for JSON locale files.** It translates only what changed, never overwrites a translation a person fixed, and checks every result before it is written.
 
 ```bash
@@ -26,8 +28,9 @@ localewarden grew out of the translation pipeline of a production app that ships
 
 - **Translates only what changed.** It remembers a hash of each source string per language. New strings are translated. Changed strings are *revised*: the model gets the existing translation and changes only what the source change requires. Removed strings are deleted from every language.
 - **Protects hand edits.** If someone edited a translation, localewarden detects it, keeps it, and lists it for review. If the source of a hand-edited string changes later, the string is flagged instead of overwritten.
-- **Checks every result before writing it.** Broken placeholders, foreign alphabets, changed links, broken HTML and echoed source text are rejected (retried once, then left for the next run). Softer problems are retried and reported.
+- **Checks every result before writing it.** Broken placeholders, injected HTML or scripts, foreign alphabets, changed links, broken HTML and echoed source text are rejected (retried once, then left for the next run). Softer problems are retried and reported.
 - **Consistent style per language.** It enforces formal or informal address per language (`du`/`Sie`, `tu`/`vous`, `ты`/`вы` and 16 more), uses sentence case where the language does, avoids gendered forms for "you", and applies local typography (French spacing, `92 %` in German, CJK quotation marks).
+- **Plural forms per language.** For i18next-style keys (`item_one`, `item_other`) it adds the forms a language needs but English lacks, such as Polish `_few` and `_many` or Arabic `_zero`, `_two`, `_few` and `_many` (CLDR plural rules).
 - **Glossary and protected names.** You choose fixed renderings ("Privacy Policy" -> "Politique de confidentialité") and names that must never be translated. The check accepts grammatical case endings.
 - **Quality check for CI.** `localewarden check` runs all checks without any API calls and exits non-zero on errors.
 - **Targeted repair.** `--fix-flagged` asks the model to fix only what the check flagged. The fix is accepted only if the problem is gone and little else changed.
@@ -131,6 +134,7 @@ The same checks run in two places. Right after each model answer, a failed hard 
 | Check | Finds | Severity |
 | --- | --- | --- |
 | `placeholder` | `{name}`, `{{count}}`, `%s`, `%1$d`, `%{x}`, `${x}`, `<0></0>` renamed, translated, added or dropped. ICU `plural`/`select` arguments are compared, while plural categories may differ per language. | error |
+| `unsafe` | HTML tags, attributes, event handlers or `javascript:`/`data:` URLs that the source does not have. Translations are often rendered as raw HTML, so this would be a script injection. | error |
 | `script` | Letters from an alphabet the language does not use ("刺激" in German), or a word that mixes Latin with Cyrillic/Greek lookalikes ("Вarda") | error |
 | `markup` | Changed link targets, different number of tags, unclosed or misnested tags, dropped list items | warning (broken tags and changed links: never written) |
 | `years` | A year from the source missing or changed (citations, dates) | warning |
@@ -148,7 +152,7 @@ npx localewarden check --strict     # exit 1 on warnings too
 npx localewarden check --json       # for scripts
 ```
 
-Approved hand edits are skipped, except for placeholder and script errors, which break the app either way.
+Approved hand edits are skipped, except for errors (placeholder, unsafe, script), which break the app either way.
 
 ### In CI
 
@@ -165,6 +169,39 @@ jobs:
         with: { node-version: 22 }
       - run: npx localewarden check
 ```
+
+### Translating automatically
+
+When the source language changes on `main`, translate and open a pull request for review:
+
+```yaml
+# .github/workflows/translate.yml
+name: translate
+on:
+  push:
+    branches: [main]
+    paths: ['locales/en.json']   # your source files
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npx localewarden --max-tokens 200000
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: localewarden/translations
+          title: Update translations
+          commit-message: Update translations
+```
+
+The pull request contains the locale files and `.localewarden/`, so a reviewer sees exactly which strings changed.
 
 ### Fixing what the check finds
 
@@ -257,12 +294,20 @@ const findings = checkProject(config);
 - Unchanged strings cost nothing. In the example above, changing two English strings and updating four languages took 4 requests and about 4,000 tokens.
 - Strings, keys, your `context` and glossary are sent to the API you configure. Nothing else is sent anywhere. There is no telemetry.
 
+## Security
+
+Translations are treated as untrusted: any markup the source does not have is blocked, files are only written inside the project, and API errors are redacted before printing. Details and how to report a problem: [SECURITY.md](SECURITY.md).
+
 ## Limitations
 
 - JSON only (nested objects, arrays, flat keys). YAML, PO, XLIFF and ARB are not supported yet.
 - The checks catch mechanical problems, not every wrong meaning. Have a native speaker look at important screens, then approve their edits with `review`.
 - Rules for form of address, gender and typography exist for the languages listed above. Other languages are translated with the general rules.
 - A run that is interrupted keeps everything written so far. Unwritten strings are picked up on the next run.
+
+## Contributing
+
+Bug reports with a concrete example (source, language, output, expected) help most. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

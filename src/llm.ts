@@ -73,7 +73,9 @@ export class OpenAICompatibleModel implements Model {
       } catch {
         // not JSON
       }
-      const text = `HTTP ${response.status}: ${message.slice(0, 300)}`;
+      // Some providers echo part of the key in auth errors; never let it reach logs.
+      const redacted = message.split(this.apiKey || '\u0000').join('***').replace(/\b(sk|rk|pk)-[\w-]{6,}/g, '$1-***');
+      const text = `HTTP ${response.status}: ${redacted.slice(0, 300)}`;
       if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 400) {
         throw new FatalModelError(text, response.status);
       }

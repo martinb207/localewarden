@@ -5,6 +5,8 @@ import {
   buildTarget,
   detectFormat,
   findSourceFiles,
+  missingPluralLeaves,
+  setAt,
   flatten,
   readText,
   serialize,
@@ -123,6 +125,10 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
   const unknown = languages.filter(lang => !config.targetLanguages.includes(lang));
   if (unknown.length > 0) throw new Error(`Not in targetLanguages: ${unknown.join(', ')}`);
 
+  if (config.context?.startsWith('Describe your product')) {
+    log.warn('"context" still has the example text from init; it is ignored. Describe your product in localewarden.config.json for better translations.');
+    config = { ...config, context: undefined };
+  }
   const files = findSourceFiles(config.root, config.files, config.sourceLanguage);
   if (files.length === 0) {
     throw new Error(`No ${config.sourceLanguage} files match "${config.files}" under ${config.root}.`);
@@ -223,7 +229,8 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
         let text = candidates[i];
         if (text === null) continue;
         let defect = checker.defect(lang, item.key, item.source, text);
-        if (defect.soft && batch.length > 1) {
+        const echoed = isUnchangedProse(item.source, text, checker.placeholderRe);
+        if (defect.soft && (batch.length > 1 || echoed)) {
           // One retry on its own, then keep whichever version is cleaner.
           const retry = await translateOne(lang, item);
           if (retry !== null) {
@@ -232,6 +239,10 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
             if (rank(retryDefect) < rank(defect)) {
               text = retry;
               defect = retryDefect;
+            } else if (echoed && isUnchangedProse(item.source, retry, checker.placeholderRe)) {
+              // Asked twice, the model keeps the source text: names and product lists are often
+              // the same in every language. Accept it instead of retrying on every run.
+              defect = { hard: null, soft: 'identical to the source (accepted after a retry)' };
             }
           }
         }
@@ -247,14 +258,20 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
   }
 
   async function processFile(file: LocaleFile, sourceDoc: JsonValue, sourceText: string): Promise<void> {
-    const leaves = stringLeaves(sourceDoc);
-    const sourceKeys = new Set(leaves.map(leaf => leaf.key));
+    const sourceLeaves = stringLeaves(sourceDoc);
 
     await inParallel(languages, config.concurrency, async lang => {
       if (stopped()) return;
       const counts = summary.languages[lang];
+      const pluralExtras = missingPluralLeaves(sourceLeaves, lang);
+      const leaves = [...sourceLeaves, ...pluralExtras];
+      const sourceKeys = new Set(leaves.map(leaf => leaf.key));
       const targetRel = file.pathFor(lang);
       const targetFile = path.join(config.root, targetRel);
+      if (!path.resolve(targetFile).startsWith(path.resolve(config.root) + path.sep)) {
+        log.error(`${targetRel} is outside the project; skipped.`);
+        return;
+      }
       const targetText = readText(targetFile);
       let targetDoc: JsonValue | null = null;
       if (targetText !== null) {
@@ -291,14 +308,16 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
             continue;
           }
           if (review) {
+            // Counted only when something new needs a person's attention, not on every run.
             if (review.status === 'approved' && review.valueHash !== curHash) {
               state.addReview(lang, file.id, key, 'edited-after-approval', cur);
+              counts.protected++;
             } else if (entry && entry.source !== sourceHash) {
               state.addReview(lang, file.id, key, 'source-changed', cur);
               log.warn(`[${lang}] ${key}: source changed, but the translation was edited by hand; kept and listed for review`);
+              counts.protected++;
             }
             state.set(lang, file.id, key, source, cur);
-            counts.protected++;
             continue;
           }
           if (entry && entry.value !== curHash) {
@@ -393,6 +412,10 @@ export async function run(config: Config, options: RunOptions = {}): Promise<Run
 
       counts.removed += removed.length;
       const built = buildTarget(sourceDoc, values) ?? {};
+      for (const leaf of pluralExtras) {
+        const value = values.get(leaf.key);
+        if (value !== undefined) setAt(built, leaf.path, value);
+      }
       const text = serialize(built, detectFormat(targetText ?? sourceText));
       if (text !== targetText && !(targetText === null && Object.keys(built).length === 0)) {
         writeText(targetFile, text);

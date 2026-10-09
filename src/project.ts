@@ -43,7 +43,8 @@ export function checkProject(config: Config, languages: string[] = config.target
       }
       if (doc === null) continue;
       for (const [key, text] of flatten(doc)) {
-        const sourceText = source.get(key);
+        // Plural forms only the target language has are checked against the source "_other".
+        const sourceText = source.get(key) ?? (/_(zero|one|two|few|many)$/.test(key) ? source.get(key.replace(/_(zero|one|two|few|many)$/, '_other')) : undefined);
         if (sourceText === undefined || sourceText.trim() === '') continue;
         const review = state.review[reviewId(lang, file.id, key)];
         const approved = review?.status === 'approved' && review.valueHash === hash(text);

@@ -171,7 +171,7 @@ async function translateCommand(args: Args): Promise<number> {
       s.revised && `${s.revised} revised`,
       s.repaired && `${s.repaired} repaired`,
       s.failed && `${s.failed} failed`,
-      s.protected && `${s.protected} hand-edited kept`,
+      s.protected && `${s.protected} new hand edit(s) kept`,
       s.removed && `${s.removed} removed`,
     ].filter(Boolean);
     console.log(`${lang.padEnd(6)} ${parts.join(', ')}`);

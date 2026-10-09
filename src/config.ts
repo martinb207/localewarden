@@ -92,10 +92,16 @@ export function resolveConfig(raw: unknown, root: string): Config {
   if (typeof config.files !== 'string' || !config.files.includes('{lang}')) {
     fail('"files" must be a path pattern containing {lang}, e.g. "locales/{lang}.json".');
   }
+  // Files are written next to the config only: no absolute paths, no "..".
+  if (path.isAbsolute(config.files) || /^[a-z]:/i.test(config.files) || config.files.split(/[\\/]/).includes('..')) {
+    fail('"files" must be a relative path inside the project (no absolute paths, no "..").');
+  }
+  const isLanguageCode = (l: unknown) => typeof l === 'string' && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$/.test(l);
+  if (!isLanguageCode(config.sourceLanguage)) fail('"sourceLanguage" must be a language code, e.g. "en".');
   if (
     !Array.isArray(config.targetLanguages) ||
     config.targetLanguages.length === 0 ||
-    !config.targetLanguages.every(l => typeof l === 'string' && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$/.test(l))
+    !config.targetLanguages.every(isLanguageCode)
   ) {
     fail('"targetLanguages" must be a non-empty list of language codes, e.g. ["de", "fr"].');
   }

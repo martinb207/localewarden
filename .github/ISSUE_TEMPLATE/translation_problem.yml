@@ -1,0 +1,34 @@
+name: Translation problem
+description: A bad translation that localewarden produced or did not flag
+labels: [translation]
+body:
+  - type: input
+    id: lang
+    attributes:
+      label: Language
+      placeholder: e.g. pl, pt-BR
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Source string
+    validations:
+      required: true
+  - type: textarea
+    id: translation
+    attributes:
+      label: Translation it produced or let through
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it should be, and why
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: e.g. gpt-5.4-mini

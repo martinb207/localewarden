@@ -14,6 +14,8 @@ import { baseLanguage, escapeRegExp } from './util.js';
  * Deterministic quality checks. No API calls, so they can run in CI on every commit.
  *
  *   placeholder   placeholder set differs from the source                        error
+ *   unsafe        HTML tags, attributes, event handlers or javascript:/data: URLs
+ *                 that the source does not have (script injection)               error
  *   script        letters from a script the language does not use, or a word
  *                 mixing Latin with Cyrillic/Greek lookalikes                    error
  *   markup        links, tags or list items differ from the source; broken tags
@@ -29,6 +31,7 @@ import { baseLanguage, escapeRegExp } from './util.js';
  */
 export type CheckName =
   | 'placeholder'
+  | 'unsafe'
   | 'script'
   | 'markup'
   | 'years'
@@ -41,6 +44,7 @@ export type CheckName =
 
 export const CHECKS: CheckName[] = [
   'placeholder',
+  'unsafe',
   'script',
   'markup',
   'years',
@@ -52,7 +56,7 @@ export const CHECKS: CheckName[] = [
   'partial',
 ];
 
-export const ERROR_CHECKS = new Set<CheckName>(['placeholder', 'script']);
+export const ERROR_CHECKS = new Set<CheckName>(['placeholder', 'unsafe', 'script']);
 
 /** Checks a targeted repair (--fix-flagged) may try to fix. */
 export const FIXABLE_CHECKS = new Set<CheckName>([
@@ -99,6 +103,8 @@ export class Checker {
     const base = baseLanguage(lang);
 
     if (!this.placeholdersMatch(key, source, text)) add('placeholder', this.placeholderNote(source, text));
+    const unsafe = unsafeAdditions(source, text);
+    if (unsafe) add('unsafe', unsafe);
     const foreign = foreignScript(this.config.sourceLanguage, source) ? null : foreignScript(lang, text);
     if (foreign) add('script', foreign);
 
@@ -174,7 +180,7 @@ export class Checker {
     const boldMarkers = (value: string) => (value.match(/\*\*/g) ?? []).length % 2;
     const brokenBold = boldMarkers(text) === 1 && boldMarkers(source) === 0 ? 'unbalanced ** markers' : null;
     const leaked = /^(here('s| is) the translation|translation:)/i.test(text.trim()) ? 'model commentary in the output' : null;
-    const hard = placeholders ?? foreign ?? links ?? echoed ?? broken ?? brokenBold ?? droppedBullets(source, text) ?? leaked;
+    const hard = placeholders ?? unsafeAdditions(source, text) ?? foreign ?? links ?? echoed ?? broken ?? brokenBold ?? droppedBullets(source, text) ?? leaked;
     const tags = tagCount(source) !== tagCount(text) ? `${tagCount(source)} tags in the source, got ${tagCount(text)}` : null;
     const copied = this.englishSource && text !== source ? sourceRun(source, text) : null;
     return { hard, soft: hard ?? tags ?? yearDifference(source, text) ?? (copied ? `source text left in: "${copied}"` : null) };
@@ -253,6 +259,60 @@ export function foreignScript(lang: string, text: string): string | null {
   if (base === 'sr') return null; // Serbian is written in both Cyrillic and Latin
   const mixed = text.match(HOMOGLYPH_WORD);
   return mixed ? `mixed-alphabet word: ${mixed[0]}` : null;
+}
+
+// ---------------------------------------------------------------------------------------
+// Unsafe additions
+
+const unescapeEntities = (text: string): string =>
+  text
+    .replace(/&lt;|&#0*60;|&#x0*3c;/gi, '<')
+    .replace(/&gt;|&#0*62;|&#x0*3e;/gi, '>')
+    .replace(/&quot;|&#0*34;|&#x0*22;/gi, '"')
+    .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
+    .replace(/&colon;|&#0*58;|&#x0*3a;/gi, ':');
+
+/** Tag names, in lower case. Numbered <0> tags (react-i18next) are placeholders, not HTML. */
+const tagNames = (html: string): Set<string> =>
+  new Set([...html.matchAll(/<\/?([a-z][\w-]*)/gi)].map(m => m[1].toLowerCase()));
+
+const TEXT_ATTRIBUTES = new Set(['title', 'alt', 'aria-label', 'aria-description', 'placeholder']);
+
+/** Every attribute as "name=value" (value without quotes), in lower case. */
+const attributes = (html: string): Set<string> => {
+  const found = new Set<string>();
+  for (const [, inner] of html.matchAll(/<[a-z][\w-]*\s([^>]*)>?/gi)) {
+    for (const [, name, v1, v2, v3] of inner.matchAll(/([^\s"'=<>\/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
+      const attr = name.toLowerCase();
+      // Text attributes are translated along with the visible text; only their presence counts.
+      const value = TEXT_ATTRIBUTES.has(attr) ? '*' : (v1 ?? v2 ?? v3 ?? '').trim().toLowerCase();
+      found.add(`${attr}=${value}`);
+    }
+  }
+  return found;
+};
+
+const DANGEROUS_URL = /(?:javascript|vbscript|data)\s*:/gi;
+
+/**
+ * Markup the translation adds that the source does not have: a new tag type, a new or changed
+ * attribute, an event handler or a script URL. Translations are often rendered as raw HTML
+ * (dangerouslySetInnerHTML, v-html), so such an addition is a script-injection risk, whether
+ * it comes from a model mistake or from a manipulated source string or response.
+ */
+export function unsafeAdditions(source: string, text: string): string | null {
+  const [src, out] = [unescapeEntities(source), unescapeEntities(text)];
+  const srcTags = tagNames(src);
+  const newTags = [...tagNames(out)].filter(tag => !srcTags.has(tag) && tag !== 'br');
+  if (newTags.length > 0) return `HTML tag not in the source: <${newTags.join('>, <')}>`;
+  const srcAttrs = attributes(src);
+  const newAttrs = [...attributes(out)].filter(attr => !srcAttrs.has(attr));
+  const handler = newAttrs.find(attr => /^on/.test(attr));
+  if (handler) return `event handler not in the source: ${handler.split('=')[0]}`;
+  if (newAttrs.length > 0) return `HTML attribute not in the source: ${newAttrs[0]}`;
+  const urls = (value: string) => (value.match(DANGEROUS_URL) ?? []).length;
+  if (urls(out) > urls(src)) return 'javascript:, vbscript: or data: URL not in the source';
+  return null;
 }
 
 // ---------------------------------------------------------------------------------------

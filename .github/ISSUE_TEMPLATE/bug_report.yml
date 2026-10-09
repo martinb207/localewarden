@@ -1,0 +1,24 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead. Paste the output.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: Your localewarden.config.json (remove anything private).
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `npx localewarden --version` and `node --version`
+    validations:
+      required: true

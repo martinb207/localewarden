@@ -1,0 +1,11 @@
+name: Feature request
+description: A format, check, language rule or option you need
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need, and why
+      description: Describe the problem first, then the solution you have in mind.
+    validations:
+      required: true
