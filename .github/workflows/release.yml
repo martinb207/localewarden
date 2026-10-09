@@ -1,0 +1,29 @@
+# Publishes to npm when a version tag (v0.1.2, ...) is pushed. Uses npm trusted publishing
+# (OIDC): no npm token is stored in GitHub, and the package gets a provenance attestation.
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - name: Tag matches package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      # prepublishOnly runs the type check, tests and build.
+      - run: npm publish
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$(awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +3)"
+        env:
+          GH_TOKEN: ${{ github.token }}

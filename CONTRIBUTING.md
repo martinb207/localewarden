@@ -37,3 +37,9 @@ OPENAI_API_KEY=sk-... node ../../dist/cli.js --dry-run
 - Run `npm run typecheck && npm test` before opening the pull request.
 
 Security problems: see [SECURITY.md](SECURITY.md).
+
+## Releasing (maintainer)
+
+1. Bump `version` in `package.json` (and `package-lock.json` via `npm install --package-lock-only`) and add a `CHANGELOG.md` entry at the top.
+2. Commit and push, then tag: `git tag v0.1.2 && git push origin v0.1.2`.
+3. The Release workflow tests, publishes to npm via trusted publishing and creates the GitHub release.
