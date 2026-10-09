@@ -1,0 +1,15 @@
+{
+  "sourceLanguage": "en",
+  "targetLanguages": ["de", "fr", "es", "ja"],
+  "files": "locales/{lang}.json",
+  "context": "Plantly is a mobile app that reminds people when to water their houseplants.",
+  "tone": "friendly and plain, no marketing hype",
+  "doNotTranslate": ["Plantly"],
+  "formality": { "de": "informal", "fr": "formal", "es": "informal" },
+  "glossary": {
+    "fr": { "Privacy Policy": "Politique de confidentialité" }
+  },
+  "termNotes": {
+    "snooze": "postpone a reminder, not sleep"
+  }
+}

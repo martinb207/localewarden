@@ -1,0 +1,21 @@
+{
+  "app": {
+    "title": "Plantly",
+    "tagline": "Keep Your Plants Alive Without Thinking About It"
+  },
+  "onboarding": {
+    "welcome": "Welcome to Plantly, {name}!",
+    "intro": "Tell us which plants you have and we'll remind you when they need water.",
+    "tip": "Most houseplants tend to need less water in winter."
+  },
+  "reminders": {
+    "due_one": "{{count}} plant needs water today",
+    "due_other": "{{count}} plants need water today",
+    "snooze": "Remind Me Tomorrow",
+    "done": "Done"
+  },
+  "settings": {
+    "privacy": "Read our <a href=\"/privacy\">Privacy Policy</a> to see what we store.",
+    "delete_account": "Delete your account and all your data"
+  }
+}
