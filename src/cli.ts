@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { ConfigError, CONFIG_FILE, loadConfig } from './config.js';
+import { ConfigError, CONFIG_FILE, loadConfig, selectGroups } from './config.js';
+import { loadPlugins } from './plugins.js';
+import { startUi } from './ui/server.js';
 import { CHECKS } from './checks.js';
 import { findSourceFiles } from './files.js';
 import { isReasoningModel } from './llm.js';
@@ -15,6 +17,7 @@ Usage:
   localewarden [translate] [options]   translate new and changed strings
   localewarden check [options]         quality check, no API calls (use in CI)
   localewarden review [options]        list and resolve hand-edited translations
+  localewarden ui [--port 4848]        local web interface (127.0.0.1 only)
   localewarden init                    create ${CONFIG_FILE}
 
 Translate options:
@@ -22,15 +25,19 @@ Translate options:
   --lang de,fr           only these languages
   --fix-flagged          let the model fix strings the quality check flags
   --retranslate-all      translate every string again (hand edits stay protected)
+  --retranslate-files <patterns>  translate every string of these files again, e.g. "locales/{lang}/onboarding.json"
+  --refresh-before <YYYY-MM-DD>   translate again what was written before that day (or adopted)
+  --group app,web        only these groups (config "groups")
   --overwrite-manual     also replace hand-edited translations
   --max-tokens <n>       token budget for this run (default: maxTokensPerRun)
   --verbose              more output
 
 Check options:
   --lang de,fr           only these languages
+  --group app,web        only these groups
   --verbose, -v          list findings, not only counts
   --limit <n>            findings shown per check with --verbose (default 20)
-  --strict               exit 1 on warnings too (default: only placeholder/script errors)
+  --strict               exit 1 on warnings too (default: only errors)
   --json                 print findings as JSON
   --fix                  repair placeholders with exactly one possible fix ({heures} -> {hours})
 
@@ -51,7 +58,7 @@ interface Args {
   values: Map<string, string[]>;
 }
 
-const VALUE_FLAGS = new Set(['--lang', '--max-tokens', '--config', '--limit', '--approve', '--release']);
+const VALUE_FLAGS = new Set(['--port', '--lang', '--group', '--max-tokens', '--config', '--limit', '--approve', '--release', '--retranslate-files', '--refresh-before']);
 
 function parseArgs(argv: string[]): Args {
   const args: Args = { command: 'translate', flags: new Set(), values: new Map() };
@@ -79,6 +86,9 @@ function parseArgs(argv: string[]): Args {
   }
   return args;
 }
+
+const listArg = (args: Args, name: string): string[] | undefined =>
+  args.values.get(name)?.flatMap(value => value.split(',')).map(v => v.trim()).filter(Boolean);
 
 const languagesArg = (args: Args): string[] | undefined =>
   args.values.get('--lang')?.flatMap(value => value.split(',')).map(l => l.trim()).filter(Boolean);
@@ -140,8 +150,13 @@ async function translateCommand(args: Args): Promise<number> {
   const config = loadConfig(args.values.get('--config')?.[0]);
   const maxTokens = args.values.get('--max-tokens')?.[0];
   if (maxTokens !== undefined && !(Number(maxTokens) > 0)) throw new ConfigError('--max-tokens must be a positive number');
+  const refreshBefore = args.values.get('--refresh-before')?.[0];
+  if (refreshBefore !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(refreshBefore)) throw new ConfigError('--refresh-before must be a date like 2026-10-01');
   const summary = await run(config, {
     languages: languagesArg(args),
+    groups: listArg(args, '--group'),
+    retranslateFiles: listArg(args, '--retranslate-files'),
+    refreshBefore,
     dryRun: args.flags.has('--dry-run'),
     retranslateAll: args.flags.has('--retranslate-all'),
     overwriteManual: args.flags.has('--overwrite-manual'),
@@ -160,6 +175,7 @@ async function translateCommand(args: Args): Promise<number> {
     }
     // Rough: prompt overhead per request plus input and output text (~4 characters per token).
     const requests = Math.ceil(strings / config.batchSize) + Math.ceil(strings * 0.05);
+    // Groups may use different models; the estimate uses the first group's.
     const low = Math.round(requests * 900 + (chars / 4) * 2.2);
     const high = Math.round(low * (isReasoningModel(config.model) ? 3 : 1.5));
     console.log(`Dry run: ${strings} string(s), ${chars.toLocaleString('en')} characters to translate.`);
@@ -181,22 +197,27 @@ async function translateCommand(args: Args): Promise<number> {
   }
   if (rows.length === 0) console.log('Everything is up to date.');
   console.log(`\n${summary.filesWritten.length} file(s) written, ${summary.requests} request(s), ${summary.tokens.toLocaleString('en')} tokens.`);
-  if (summary.stoppedByBudget) console.log('Stopped at the token budget. Run again to continue.');
+  if (summary.filesCopied.length > 0) console.log(`${summary.filesCopied.length} file(s) copied to their regional locales.`);
+  if (summary.stoppedByBudget) console.log(`Stopped: ${summary.stopReason ?? 'token budget reached'}. Run again to continue.`);
   if (summary.pendingReview > 0) console.log(`${summary.pendingReview} hand-edited translation(s) to review: npx localewarden review`);
   const failed = Object.values(summary.languages).some(s => s.failed > 0);
   if (failed) console.log('Failed strings were not written and will be retried on the next run.');
   return 0;
 }
 
-function checkCommand(args: Args): number {
+async function checkCommand(args: Args): Promise<number> {
   const config = loadConfig(args.values.get('--config')?.[0]);
-  const languages = languagesArg(args) ?? config.targetLanguages;
-  let findings = checkProject(config, languages);
+  const plugins = await loadPlugins(config);
+  const groupNames = listArg(args, '--group');
+  const groups = selectGroups(config, groupNames, languagesArg(args));
+  const languages = languagesArg(args) ?? [...new Set(groups.flatMap(g => g.targetLanguages))];
+  const options = { languages, groups: groupNames, plugins };
+  let findings = checkProject(config, options);
   if (args.flags.has('--fix')) {
     const fixed = fixPlaceholders(config, findings);
     for (const f of fixed) console.log(`fixed [${f.lang}] ${f.file} ${f.key}: ${f.text}`);
     console.log(`${fixed.length} placeholder(s) repaired.\n`);
-    if (fixed.length > 0) findings = checkProject(config, languages);
+    if (fixed.length > 0) findings = checkProject(config, options);
   }
   if (args.flags.has('--json')) {
     console.log(JSON.stringify(findings, null, 2));
@@ -255,6 +276,8 @@ function reviewCommand(args: Args): number {
 }
 
 async function main(): Promise<number> {
+  const major = Number(process.versions.node.split('.')[0]);
+  if (major < 20) throw new ConfigError(`localewarden needs Node.js 20 or newer; this is ${process.versions.node}.`);
   const args = parseArgs(process.argv.slice(2));
   if (args.flags.has('--help')) {
     console.log(HELP);
@@ -268,12 +291,22 @@ async function main(): Promise<number> {
     case 'translate':
       return translateCommand(args);
     case 'check':
-      return checkCommand(args);
+      return await checkCommand(args);
     case 'review':
       return reviewCommand(args);
     case 'init':
       init();
       return 0;
+    case 'ui': {
+      const config = loadConfig(args.values.get('--config')?.[0]);
+      const port = args.values.get('--port')?.[0];
+      if (port !== undefined && !/^\d+$/.test(port)) throw new ConfigError('--port must be a number');
+      const ui = await startUi(config, { port: port === undefined ? undefined : Number(port) });
+      console.log(`localewarden interface: ${ui.url}`);
+      console.log('Only reachable from this computer. Press Ctrl+C to stop.');
+      await new Promise(() => {}); // runs until Ctrl+C
+      return 0;
+    }
     default:
       throw new ConfigError(`Unknown command "${args.command}". See --help.`);
   }

@@ -1,0 +1,10 @@
+{
+  "home": {
+    "title": "Your Plants Today",
+    "pickUp": "Pick up the watering can and water your fern.",
+    "question": "Ready to start?"
+  },
+  "compare": {
+    "note": "Plantly reminds you on time, every time."
+  }
+}

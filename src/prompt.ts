@@ -20,6 +20,8 @@ export interface PromptItem {
   maxLength?: number;
   /** Set when --fix-flagged revises a translation that lost content. */
   completing?: boolean;
+  /** File id ("locales/{lang}/common.json"), for plugins. */
+  file?: string;
 }
 
 function intro(config: Config, lang: string): string {
@@ -57,7 +59,7 @@ const REVISION_RULE =
   'start from the existing translation: keep its wording, terms and sentence structure wherever it still says what the source now says, and change only the parts where the source differs. Remove anything the existing translation says that the source no longer says, and add what is new. Do not reword text that is still correct.';
 
 /** System prompt for translating a JSON array of strings. */
-export function batchPrompt(config: Config, lang: string, items: PromptItem[]): string {
+export function batchPrompt(config: Config, lang: string, items: PromptItem[], notes = ''): string {
   const keys = ` CONTEXT: each element is a UI string. Its key (by 1-based position) hints at the screen and role; use it to pick the right meaning, never translate or output it: ${items
     .map((item, i) => `${i + 1}=${item.key}`)
     .join(', ')}.`;
@@ -76,7 +78,7 @@ export function batchPrompt(config: Config, lang: string, items: PromptItem[]): 
   const plural = items.some(item => /_(zero|one|two|few|many|other)$/.test(item.key))
     ? ` PLURALS: keys ending in _zero, _one, _two, _few, _many or _other are plural forms (Unicode CLDR categories) of ${languageName(lang)}. Write the form of that category, even when the source text given is the English plural (_zero is used when the count is 0, _two when it is 2; keep the {{count}} placeholder).`
     : '';
-  return `${intro(config, lang)} Translate each string in the JSON array. Return ONLY a valid JSON array of strings with the same number of elements in the same order. No explanations, no code fences.${rules(config, lang, items.map(i => i.source))}${keys}${lengths}${plural}${revision}`;
+  return `${intro(config, lang)} Translate each string in the JSON array. Return ONLY a valid JSON array of strings with the same number of elements in the same order. No explanations, no code fences.${rules(config, lang, items.map(i => i.source))}${keys}${lengths}${plural}${revision}${notes}`;
 }
 
 /** System prompt for translating one string as plain text. */

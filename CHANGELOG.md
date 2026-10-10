@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0
+
+Plugins, groups, a web interface, and hardening for everyday use. Built and tested against a
+production app with 38 languages (app UI, website, long-form content, store listings).
+
+- **Plugins** (experimental): `plugins` in the config load ES modules with `checks` (errors block writing, fixable findings go to `--fix-flagged`), `promptNotes`, `postProcess` and `order`. Plugin checks appear as their own columns in `check`. Example in `examples/plugin`.
+- **Groups**: parts of a project with their own files, languages and model settings, translated in config order and sharing one budget; `--group` runs some of them.
+- **Daily token budget** across runs (`dailyTokenBudget`, usage in `<stateDir>/usage.json`), for scheduled jobs.
+- **Copies** of locales instead of translations (`copies`, e.g. en-GB from en-US).
+- **Long strings** are translated paragraph by paragraph (`chunkChars`); model commentary, code fences and wrapping quotes are stripped from answers.
+- `--refresh-before <date>` re-translates strings written before that day (or adopted); `--retranslate-files <patterns>` re-translates whole files. Hand edits stay protected.
+- **Web interface**: `localewarden ui` (127.0.0.1 only, access token): progress per group and language, strings with search and inline editing, check findings, review list, runs with live log.
+- **Reliability**: lock file against parallel runs (also guards review approvals and interface edits; machine name recorded; safe takeover of stale locks); a failing language stops the run cleanly; translations are recorded in the state only after their file was written; symbolic links written through; JSON nulls in model answers re-requested; atomic writes of locale files and state, progress saved on Ctrl+C/SIGTERM, Windows line endings and byte order marks kept, NFC-normalized hashes, clear errors for a corrupt state file and old Node.js versions, warning for dotted/nested key collisions, symbolic links followed.
+- **Group settings merge** with the top level (maps merged, lists extended); unknown group or language names are an error in `translate` and `check`.
+- **Modular engine**: planning, translation, repair, writing and copies are separate modules (`src/engine/`); the budget, plugins and groups have their own modules.
+- Programmatic API: `checkProject(config, { languages, groups, plugins })`, `loadPlugins`, `startUi`, `Budget`, `isError`, `isFixable`.
+
 ## 0.2.0
 
 Data files, store listings and fewer false alarms, tested against a real project with 38 languages.

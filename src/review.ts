@@ -1,7 +1,8 @@
 import path from 'node:path';
-import type { Config } from './config.js';
+import { groupsOf, type Config } from './config.js';
 import { findSourceFiles, flatten, parseDoc, readText } from './files.js';
 import { parseReviewId, reviewId, State } from './state.js';
+import { withLock } from './lock.js';
 import { hash, today } from './util.js';
 
 export interface ReviewItem {
@@ -53,38 +54,42 @@ function matches(selector: string, lang: string, key: string): boolean {
  * Returns the number of entries changed.
  */
 export function updateReview(config: Config, action: 'approve' | 'release', selectors: string[]): number {
-  const state = new State(path.join(config.root, config.stateDir));
-  let changed = 0;
-  for (const [id, entry] of Object.entries(state.review)) {
-    const { lang, file, key } = parseReviewId(id);
-    if (!selectors.some(selector => matches(selector, lang, key))) continue;
-    if (action === 'approve') {
-      const value = currentValue(config, lang, file, key);
-      if (value === undefined) continue;
-      state.review[id] = { ...entry, status: 'approved', valueHash: hash(value) };
-    } else {
-      delete state.review[id];
-      state.invalidate(lang, file, key);
-    }
-    changed++;
-  }
-  // Approving a string that is not on the list marks it as checked by a person: it is then
-  // protected like a hand edit and the quality check no longer reports warnings for it.
-  if (action === 'approve') {
-    const exact = selectors.filter(sel => sel !== 'all' && !sel.endsWith(':*') && sel.includes(':'));
-    for (const selector of exact) {
-      const colon = selector.indexOf(':');
-      const [lang, key] = [selector.slice(0, colon), selector.slice(colon + 1)];
-      for (const file of findSourceFiles(config.root, config.files, config.sourceLanguage)) {
-        const id = reviewId(lang, file.id, key);
-        if (state.review[id]) continue;
-        const value = currentValue(config, lang, file.id, key);
+  // Under the run lock: a run in progress would otherwise overwrite these changes.
+  return withLock(path.join(config.root, config.stateDir), () => {
+    const state = new State(path.join(config.root, config.stateDir));
+    let changed = 0;
+    for (const [id, entry] of Object.entries(state.review)) {
+      const { lang, file, key } = parseReviewId(id);
+      if (!selectors.some(selector => matches(selector, lang, key))) continue;
+      if (action === 'approve') {
+        const value = currentValue(config, lang, file, key);
         if (value === undefined) continue;
-        state.review[id] = { status: 'approved', reason: 'approved-by-hand', file: file.pathFor(lang), since: today(), valueHash: hash(value) };
-        changed++;
+        state.review[id] = { ...entry, status: 'approved', valueHash: hash(value) };
+      } else {
+        delete state.review[id];
+        state.invalidate(lang, file, key);
+      }
+      changed++;
+    }
+    // Approving a string that is not on the list marks it as checked by a person: it is then
+    // protected like a hand edit and the quality check no longer reports warnings for it.
+    if (action === 'approve') {
+      const exact = selectors.filter(sel => sel !== 'all' && !sel.endsWith(':*') && sel.includes(':'));
+      for (const selector of exact) {
+        const colon = selector.indexOf(':');
+        const [lang, key] = [selector.slice(0, colon), selector.slice(colon + 1)];
+        const files = groupsOf(config).flatMap(group => findSourceFiles(group.root, group.files, group.sourceLanguage));
+        for (const file of files) {
+          const id = reviewId(lang, file.id, key);
+          if (state.review[id]) continue;
+          const value = currentValue(config, lang, file.id, key);
+          if (value === undefined) continue;
+          state.review[id] = { status: 'approved', reason: 'approved-by-hand', file: file.pathFor(lang), since: today(), valueHash: hash(value) };
+          changed++;
+        }
       }
     }
-  }
-  if (changed > 0) state.save();
-  return changed;
+    if (changed > 0) state.save();
+    return changed;
+  });
 }

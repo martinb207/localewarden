@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { writeText } from './files.js';
 import { hash, sortObject, today } from './util.js';
 
 /**
@@ -44,23 +45,32 @@ export const reviewId = (lang: string, fileId: string, key: string): string =>
   `${lang}|${stringId(fileId, key)}`;
 
 export function parseReviewId(id: string): { lang: string; file: string; key: string } {
+  // File ids are paths and contain no "#"; keys may ("faq.#1"), so split at the first one.
   const bar = id.indexOf('|');
-  const hashMark = id.lastIndexOf('#');
+  const hashMark = id.indexOf('#', bar + 1);
   return { lang: id.slice(0, bar), file: id.slice(bar + 1, hashMark), key: id.slice(hashMark + 1) };
 }
 
 function readJson<T>(file: string, fallback: T): T {
+  let text: string;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
+    text = fs.readFileSync(file, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback;
-    throw new Error(`Could not read ${file}: ${(error as Error).message}`);
+    throw error;
+  }
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/, '')) as T;
+  } catch (error) {
+    throw new Error(
+      `${file} is not valid JSON (${(error as Error).message}). It is localewarden's own bookkeeping: ` +
+        'restore it from git, or delete it (translations are kept and adopted again; hand edits made since are then not detected).'
+    );
   }
 }
 
 function writeJson(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  writeText(file, JSON.stringify(value, null, 2) + '\n');
 }
 
 export class State {
@@ -77,17 +87,27 @@ export class State {
     this.repairFailures = readJson(path.join(dir, 'repair-failures.json'), {});
   }
 
-  /** Hashes recorded for a string, or undefined if localewarden has not seen it yet. */
-  get(lang: string, fileId: string, key: string): { source: string; value: string } | undefined {
+  /**
+   * Hashes recorded for a string, or undefined if localewarden has not seen it yet. `date` is
+   * the UTC day (YYYY-MM-DD) localewarden wrote it; empty for adopted existing translations.
+   */
+  get(lang: string, fileId: string, key: string): { source: string; value: string; date: string } | undefined {
     const raw = this.entries[lang]?.[stringId(fileId, key)];
     if (!raw) return undefined;
-    const [source, value] = raw.split(':');
-    return { source, value };
+    const [source, value, date = ''] = raw.split(':');
+    return { source, value, date: date ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : '' };
   }
 
-  /** Records that `value` is the current translation of `source`. */
-  set(lang: string, fileId: string, key: string, source: string, value: string): void {
-    (this.entries[lang] ??= {})[stringId(fileId, key)] = `${hash(source)}:${hash(value)}`;
+  /**
+   * Records that `value` is the current translation of `source`, written today; pass
+   * `written: false` for a translation that was adopted or protected, not written by us.
+   */
+  set(lang: string, fileId: string, key: string, source: string, value: string, written = true): void {
+    const id = stringId(fileId, key);
+    const previous = this.get(lang, fileId, key);
+    const keepDate = !written && previous && previous.value === hash(value) ? previous.date.replace(/-/g, '') : '';
+    const date = written ? today().replace(/-/g, '') : keepDate;
+    (this.entries[lang] ??= {})[id] = `${hash(source)}:${hash(value)}${date ? `:${date}` : ''}`;
   }
 
   /** Marks a recorded string as needing re-translation (source hash cleared). */

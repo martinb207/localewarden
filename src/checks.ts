@@ -8,6 +8,7 @@ import {
   registerFor,
   withoutQuotedSpeech,
 } from './style.js';
+import { PluginHost } from './plugins.js';
 import { Scope } from './scope.js';
 import { baseLanguage, escapeRegExp, isTraditionalChinese } from './util.js';
 
@@ -77,9 +78,22 @@ export const FIXABLE_CHECKS = new Set<CheckName>([
 ]);
 
 export interface Issue {
-  check: CheckName;
+  /** A built-in check name, or a plugin's own check name. */
+  check: CheckName | (string & {});
   note?: string;
+  /** Set for plugin issues; built-in checks use ERROR_CHECKS. */
+  severity?: 'error' | 'warning';
+  /** Set for plugin issues; built-in checks use FIXABLE_CHECKS. */
+  fixable?: boolean;
 }
+
+/** Errors break the software (and fail `localewarden check`); everything else is a warning. */
+export const isError = (issue: Issue): boolean =>
+  issue.severity === 'error' || ERROR_CHECKS.has(issue.check as CheckName);
+
+/** Whether `--fix-flagged` may ask the model to fix the issue. */
+export const isFixable = (issue: Issue): boolean =>
+  issue.fixable ?? FIXABLE_CHECKS.has(issue.check as CheckName);
 
 export class Checker {
   readonly config: Config;
@@ -88,8 +102,11 @@ export class Checker {
   /** Words of termNotes and doNotTranslate: terms a translation may keep in the source language. */
   readonly keptWords: Set<string>;
 
-  constructor(config: Config) {
+  readonly plugins: PluginHost;
+
+  constructor(config: Config, plugins: PluginHost = new PluginHost()) {
     this.config = config;
+    this.plugins = plugins;
     this.placeholderRe = placeholderRegExp(config.placeholders);
     this.scope = new Scope(config);
     this.keptWords = new Set(
@@ -122,7 +139,7 @@ export class Checker {
   }
 
   /** All issues of one translated string. */
-  checkString(lang: string, key: string, source: string, text: string): Issue[] {
+  checkString(lang: string, key: string, source: string, text: string, file = ''): Issue[] {
     const issues: Issue[] = [];
     const add = (check: CheckName, note?: string) => issues.push({ check, note });
     const base = baseLanguage(lang);
@@ -191,6 +208,9 @@ export class Checker {
         add('partial', 'hedge dropped: the source says "tend to", the translation states it as certain');
       }
     }
+    for (const issue of this.plugins.checks({ lang, key, file, source, text })) {
+      issues.push({ severity: 'warning', fixable: false, ...issue });
+    }
     return issues;
   }
 
@@ -201,8 +221,11 @@ export class Checker {
    *   soft: likely loss (tag count, missing year, source words left in). Retried once, then
    *         accepted; `localewarden check` keeps reporting it.
    */
-  defect(lang: string, key: string, source: string, text: string): { hard: string | null; soft: string | null } {
+  defect(lang: string, key: string, source: string, text: string, file = ''): { hard: string | null; soft: string | null } {
     if (!text.trim()) return { hard: 'empty translation', soft: null };
+    // A plugin error blocks writing, like a broken placeholder.
+    const pluginError = this.plugins.checks({ lang, key, file, source, text }).find(issue => issue.severity === 'error');
+    if (pluginError) return { hard: `${pluginError.check}${pluginError.note ? `: ${pluginError.note}` : ''}`, soft: null };
     const placeholders = this.placeholdersMatch(key, source, text) ? null : `placeholder mismatch: ${this.placeholderNote(source, text)}`;
     const foreign = foreignScript(this.config.sourceLanguage, source) ? null : foreignScript(lang, text);
     const links = hrefSignature(source) !== hrefSignature(text) ? `links changed: [${hrefSignature(source)}] -> [${hrefSignature(text)}]` : null;

@@ -1,5 +1,8 @@
 import type { Config } from './config.js';
+import type { Budget } from './budget.js';
 import { sleep } from './util.js';
+
+export { BudgetExceededError } from './budget.js';
 
 export interface Completion {
   text: string;
@@ -93,27 +96,19 @@ export class OpenAICompatibleModel implements Model {
   }
 }
 
-export class BudgetExceededError extends Error {}
-
 /**
- * Wraps a Model with retries, spacing between requests and the per-run token budget.
+ * Wraps a Model with retries, spacing between requests and the shared token budget.
  * The budget is checked before each request; the request that crosses it still completes.
  */
 export class Client {
-  tokens = 0;
-  requests = 0;
   private lastStart = 0;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly model: Model,
-    private readonly maxTokens: number,
+    readonly budget: Budget,
     private readonly options: { retries?: number; minSpacingMs?: number; onRetry?: (message: string) => void } = {}
   ) {}
-
-  get budgetExceeded(): boolean {
-    return this.tokens >= this.maxTokens;
-  }
 
   /** Enforces a minimum gap between request starts across all parallel workers. */
   private spacing(): Promise<void> {
@@ -130,12 +125,11 @@ export class Client {
   async complete(system: string, user: string, timeoutMs: number): Promise<string> {
     const retries = this.options.retries ?? 3;
     for (let attempt = 1; ; attempt++) {
-      if (this.budgetExceeded) throw new BudgetExceededError(`token budget of ${this.maxTokens.toLocaleString('en')} reached`);
+      this.budget.check();
       await this.spacing();
       try {
-        this.requests++;
         const result = await this.model.complete(system, user, { timeoutMs });
-        this.tokens += result.tokens;
+        this.budget.record(result.tokens);
         return result.text;
       } catch (error) {
         if (error instanceof FatalModelError || attempt > retries) throw error;

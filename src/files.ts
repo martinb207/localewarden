@@ -26,18 +26,39 @@ function tokenize(pattern: string): Token[] {
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.localewarden']);
 
-function walk(root: string, dir: string, out: string[]): void {
+/** Lists files below `dir`, following symbolic links once (a link loop is not followed again). */
+function walk(root: string, dir: string, out: string[], seen = new Set<string>()): void {
+  const full = path.join(root, dir);
+  let real: string;
+  try {
+    real = fs.realpathSync(full);
+  } catch {
+    return;
+  }
+  if (seen.has(real)) return;
+  seen.add(real);
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true });
+    entries = fs.readdirSync(full, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
     const rel = dir ? `${dir}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) walk(root, rel, out);
-    } else if (entry.isFile()) {
+    let isDir = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      try {
+        const stat = fs.statSync(path.join(root, rel));
+        isDir = stat.isDirectory();
+        isFile = stat.isFile();
+      } catch {
+        continue; // broken link
+      }
+    }
+    if (isDir) {
+      if (!SKIP_DIRS.has(entry.name)) walk(root, rel, out, seen);
+    } else if (isFile) {
       out.push(rel);
     }
   }
@@ -192,7 +213,8 @@ export function buildTarget(source: JsonValue, values: Map<string, string>, pref
       if (built && typeof built === 'object' && !Array.isArray(built) && Object.keys(built).length === 0) {
         continue;
       }
-      result[key] = built;
+      // defineProperty: a key named "__proto__" stays a key instead of setting the prototype.
+      Object.defineProperty(result, key, { value: built, enumerable: true, writable: true, configurable: true });
     }
     return result;
   }
@@ -252,16 +274,33 @@ export function setAt(doc: JsonValue, segments: PathSegment[], value: string): v
 export interface JsonFormat {
   indent: string;
   finalNewline: boolean;
+  /** Line ending of the existing file ("\r\n" on Windows checkouts). */
+  eol: '\n' | '\r\n';
+  /** The existing file starts with a byte order mark. */
+  bom: boolean;
 }
 
 /** Indentation and final newline of an existing JSON text (2 spaces by default). */
+/** Indentation, final newline, line ending and BOM of an existing text (2 spaces, LF by default). */
 export function detectFormat(text: string | null): JsonFormat {
-  const indent = text?.match(/^[{[]\s*\n([ \t]+)\S/)?.[1] ?? '  ';
-  return { indent, finalNewline: text === null ? true : text.endsWith('\n') };
+  const indent = text?.match(/^\uFEFF?[{[][ \t]*\r?\n([ \t]+)\S/)?.[1] ?? '  ';
+  return {
+    indent,
+    finalNewline: text === null ? true : text.endsWith('\n'),
+    eol: text?.includes('\r\n') ? '\r\n' : '\n',
+    bom: text?.startsWith('\uFEFF') ?? false,
+  };
+}
+
+/** Line endings, final newline and BOM applied to text written with "\n". */
+function applyFormat(text: string, format: JsonFormat): string {
+  const body = format.eol === '\r\n' ? text.replace(/\r?\n/g, '\r\n') : text;
+  return (format.bom ? '\uFEFF' : '') + body + (format.finalNewline ? format.eol : '');
 }
 
 export function serialize(value: JsonValue, format: JsonFormat): string {
-  return JSON.stringify(value, null, format.indent) + (format.finalNewline ? '\n' : '');
+  // JSON.stringify escapes newlines inside strings, so every raw "\n" is structural.
+  return applyFormat(JSON.stringify(value, null, format.indent), format);
 }
 
 const txtKey = (rel: string): string => path.posix.basename(rel.replace(/\\/g, '/'), '.txt');
@@ -271,8 +310,9 @@ const txtKey = (rel: string): string => path.posix.basename(rel.replace(/\\/g, '
  * string, keyed by its file name, so maxLength patterns like "keywords" apply to it.
  */
 export function parseDoc(rel: string, text: string): JsonValue {
-  if (rel.endsWith('.txt')) return { [txtKey(rel)]: text.replace(/\r?\n$/, '') };
-  return JSON.parse(text) as JsonValue;
+  const body = text.replace(/^\uFEFF/, '');
+  if (rel.endsWith('.txt')) return { [txtKey(rel)]: body.replace(/\r?\n$/, '').replace(/\r\n/g, '\n') };
+  return JSON.parse(body) as JsonValue;
 }
 
 /** Flutter ARB metadata ("@@locale", "@title": { description, placeholders }): not text. */
@@ -282,7 +322,7 @@ export const isArbMetadata = (rel: string, key: string): boolean => rel.endsWith
 export function serializeDoc(rel: string, doc: JsonValue, format: JsonFormat): string | null {
   if (!rel.endsWith('.txt')) return serialize(doc, format);
   const value = (doc as Record<string, JsonValue>)[txtKey(rel)];
-  return typeof value === 'string' ? value + (format.finalNewline ? '\n' : '') : null;
+  return typeof value === 'string' ? applyFormat(value, format) : null;
 }
 
 export function readText(file: string): string | null {
@@ -294,7 +334,28 @@ export function readText(file: string): string | null {
   }
 }
 
+/**
+ * Writes via a temporary file and a rename, so an interrupted run never leaves a half-written
+ * locale file behind.
+ */
 export function writeText(file: string, text: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text, 'utf8');
+  // A symbolic link is written through (the link stays a link), with the file's own mode.
+  let target = file;
+  let mode: number | undefined;
+  try {
+    target = fs.realpathSync(file);
+    mode = fs.statSync(target).mode & 0o7777;
+  } catch {
+    // does not exist yet
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.localewarden-tmp`;
+  try {
+    fs.writeFileSync(tmp, text, { encoding: 'utf8', ...(mode !== undefined ? { mode } : {}) });
+    if (mode !== undefined) fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    fs.rmSync(tmp, { force: true });
+    throw error;
+  }
 }

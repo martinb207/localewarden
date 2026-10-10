@@ -41,7 +41,11 @@ localewarden grew out of the translation pipeline of a production app that ships
 - **Glossary and protected names.** You choose fixed renderings ("Privacy Policy" -> "Politique de confidentialité") and names that must never be translated. The check accepts grammatical case endings.
 - **Quality check for CI.** `localewarden check` runs all checks without any API calls and exits non-zero on errors.
 - **Targeted repair.** `--fix-flagged` asks the model to fix only what the check flagged. The fix is accepted only if the problem is gone and little else changed.
-- **Budget control.** A token budget per run, a dry run with a cost estimate, and graceful stop and resume.
+- **Budget control.** A token budget per run and per day (for scheduled jobs), a dry run with a cost estimate, and graceful stop and resume.
+- **Groups.** Parts of a project with their own files, languages and model settings, translated in a fixed order (say app UI first, long-form content last, with a cheaper setting).
+- **Plugins.** Your own checks, prompt notes, post-processing and file order, without forking.
+- **Web interface.** `npx localewarden ui`: progress per language, strings with inline editing, check findings, the review list, and runs with a live log. Local only.
+- **Reliable in daily use.** Lock against parallel runs, atomic writes, progress saved on Ctrl+C, Windows line endings and byte order marks kept.
 - **No runtime dependencies.** Node.js 20+.
 
 ## Example
@@ -118,7 +122,12 @@ German uses "du" and French "vous", as configured. Spanish and French use senten
    git add locales .localewarden
    ```
 
-   `.localewarden/` holds the hashes that tell localewarden what changed and what was edited by hand. Commit it so your team and your CI share the same state.
+   `.localewarden/` holds the hashes that tell localewarden what changed and what was edited by hand. Commit it so your team and your CI share the same state, except two local files:
+
+   ```gitignore
+   .localewarden/usage.json
+   .localewarden/run.lock
+   ```
 
 ## How it decides what to translate
 
@@ -222,6 +231,22 @@ npx localewarden --fix-flagged
 
 For each flagged string, the model gets the source, the current translation and the exact findings, with the instruction to change only what is needed. The fix is written only if the same check passes afterwards, nothing else breaks, and few words changed. Rejected fixes are recorded in `.localewarden/repair-failures.json` and not retried until the translation changes.
 
+## Web interface
+
+```bash
+npx localewarden ui            # prints a local URL with an access token
+```
+
+- **Overview:** progress per group and language, hand edits waiting for review, tokens used today.
+- **Strings:** search by key, source or translation; show only missing ones; edit a translation inline. An edit counts as checked by a person: it is approved and protected from runs.
+- **Check:** run the quality check and filter findings by language and check.
+- **Review:** approve hand edits or hand them back.
+- **Run:** dry run, translate or fix flagged strings, with a live log.
+
+The interface listens on `127.0.0.1` only, needs the random token from the printed URL, and
+rejects requests with another host name, so websites open in your browser cannot use it.
+It writes only to the project's own locale files.
+
 ## Hand edits and review
 
 ```bash
@@ -264,6 +289,71 @@ npx localewarden review --release de:home.title   # hand it back: next run revis
 | `concurrency` | `4` | Languages translated in parallel |
 | `batchSize` | `20` | Strings per request (smaller for scripts that need many tokens) |
 | `stateDir` | `".localewarden"` | Where state and the review list live |
+| `dailyTokenBudget` | | Token limit per UTC day across runs (for scheduled jobs); usage is kept in `<stateDir>/usage.json` (add it to `.gitignore`) |
+| `copies` | `{}` | Locales that are a copy of another one instead of a translation: `{"en-GB": "en-US", "fr-CA": "fr-FR"}` |
+| `chunkChars` | `8000` | Longer strings are translated paragraph by paragraph |
+| `plugins` | `[]` | Plugin modules, see [Plugins](#plugins) |
+| `groups` | | Parts of the project with their own settings, see [Groups](#groups) |
+
+### Groups
+
+Different parts of a project often need different settings: the app UI translated first and
+with care, long articles last and with a cheaper setting, store listings with other locale
+codes. Each group inherits the top-level settings and may override them:
+
+```json
+{
+  "targetLanguages": ["de", "fr", "pl"],
+  "dailyTokenBudget": 2000000,
+  "groups": [
+    { "name": "app", "files": "src/locales/{lang}/*.json" },
+    { "name": "store", "files": "fastlane/metadata/{lang}/*.txt", "sourceLanguage": "en-US",
+      "targetLanguages": ["de-DE", "fr-FR", "pl"], "copies": { "fr-CA": "fr-FR" } },
+    { "name": "articles", "files": "content/*/*.{lang}.json", "reasoningEffort": "low",
+      "ignoreKeys": ["id", "slug", "image"] }
+  ]
+}
+```
+
+Groups run in this order and share the budget, so the important ones are done first when the
+budget runs out. `--group app,store` runs only some; an unknown group name is an error.
+
+What a group inherits: maps (`formality`, `glossary` per language, `termNotes`, `instructions`,
+`maxLength`) are merged with the top level, lists (`doNotTranslate`, `ignoreKeys`, `exclude`)
+are extended, and everything else is replaced. A group with its own `targetLanguages` or
+`sourceLanguage` does not inherit `copies`, since those name locales. `stateDir`, `plugins`, `dailyTokenBudget`,
+`maxTokensPerRun` and `concurrency` apply to the whole run and can only be set at the top level.
+
+### Plugins
+
+A plugin adds project rules without forking localewarden. It is an ES module; its default
+export is a plugin object, or a function that receives the options from the config:
+
+```js
+// rules/my-plugin.mjs
+export default (options) => ({
+  name: 'my-rules',
+  // Extra findings for one translated string. "error" blocks writing it and fails `check`;
+  // "fixable" lets --fix-flagged repair it.
+  checks: ({ lang, key, file, source, text }) =>
+    lang === 'es' && /\bcoger\b/i.test(text)
+      ? [{ check: 'regional-term', note: 'use "tomar"', fixable: true }]
+      : [],
+  // Extra prompt text for a batch (sent with every request of the batch).
+  promptNotes: ({ lang, items }) => (lang === 'es' ? 'Use neutral Latin American Spanish.' : ''),
+  // Rewrites a model answer before it is checked and written.
+  postProcess: ({ lang, text }) => (lang === 'fr' ? text.replace(/ ([?!:;])/g, '\u00a0$1') : text),
+  // Reorders or filters the files of a group.
+  order: (files, { group }) => files,
+});
+```
+
+```json
+{ "plugins": ["./rules/my-plugin.mjs", { "module": "./rules/blog.mjs", "options": { "draftsFolder": "drafts" } }] }
+```
+
+All hooks are optional. The interface is marked experimental in 0.x and may change in a minor
+version. A complete example is in [`examples/plugin`](examples/plugin).
 
 ### App Store and Play Store listings (fastlane)
 
@@ -311,10 +401,12 @@ Small local models make noticeably more mistakes. The checks catch the mechanica
 ## Commands
 
 ```text
-localewarden [translate]  --dry-run --lang de,fr --fix-flagged --retranslate-all
+localewarden [translate]  --dry-run --lang de,fr --group app --fix-flagged --retranslate-all
+                          --retranslate-files <patterns> --refresh-before <YYYY-MM-DD>
                           --overwrite-manual --max-tokens <n> --verbose
-localewarden check        --lang de,fr --verbose --limit <n> --strict --json --fix
+localewarden check        --lang de,fr --group app --verbose --limit <n> --strict --json --fix
 localewarden review       --all --approve <sel>... --release <sel>...
+localewarden ui           --port <n>
 localewarden init
 Global: --config <path>  --help  --version
 ```
@@ -349,6 +441,18 @@ Translations are treated as untrusted: any markup the source does not have is bl
 - The checks catch mechanical problems, not every wrong meaning. Have a native speaker look at important screens, then approve their edits with `review`.
 - Rules for form of address, gender and typography exist for the languages listed above. Other languages are translated with the general rules.
 - A run that is interrupted keeps everything written so far. Unwritten strings are picked up on the next run.
+
+## Reliability
+
+- **One run at a time:** a lock file in the state folder stops a second run (say CI and a local run), or an approval or edit during a run, from writing the same state; a lock left by a crashed process (or committed from another machine) is taken over safely.
+- **Errors stop cleanly:** when one language fails, no further language starts, and the run ends only after the running ones finished.
+- **Symbolic links** to locale files are written through; the file keeps its permissions.
+- **No half-written files:** locale files and state are written to a temporary file and renamed.
+- **Ctrl+C or a CI timeout** saves what was translated so far.
+- **File formats are kept:** indentation, key order of existing files, Windows line endings, byte order marks. A file whose content did not change is not rewritten.
+- **Unicode:** text is compared NFC-normalized, so an editor that saves "é" decomposed does not look like a hand edit.
+- **Clear errors** for invalid JSON, a corrupt state file, an unknown group, an old Node.js version, or a dotted key that collides with a nested one.
+- **Symbolic links** to locale folders are followed (once, so a link loop does no harm).
 
 ## Contributing
 

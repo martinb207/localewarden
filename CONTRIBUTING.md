@@ -27,6 +27,15 @@ cd examples/basic
 OPENAI_API_KEY=sk-... node ../../dist/cli.js --dry-run
 ```
 
+## Code layout
+
+- `src/translate.ts` runs groups and languages; the steps live in `src/engine/`:
+  `planner.ts` (what to translate, revise, protect), `translator.ts` (requests, batches, long
+  texts), `repair.ts` (`--fix-flagged`), `writer.ts` (writing files), `copies.ts`, `sources.ts`.
+- `src/checks.ts` and `src/placeholders.ts`: quality checks; `src/style.ts`: per-language rules.
+- `src/plugins.ts`, `src/budget.ts`, `src/lock.ts`, `src/state.ts`, `src/config.ts`.
+- `src/ui/`: the web interface (`server.ts`, `data.ts`, `page.ts`).
+
 ## Pull requests
 
 - Keep changes focused, and add a test for every bug fix and new check.

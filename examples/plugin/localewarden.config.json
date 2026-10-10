@@ -1,0 +1,8 @@
+{
+  "targetLanguages": ["es", "fr", "de"],
+  "files": "locales/{lang}.json",
+  "context": "Plantly is a mobile app that reminds people when to water their houseplants.",
+  "doNotTranslate": ["Plantly"],
+  "formality": { "es": "informal", "fr": "formal", "de": "informal" },
+  "plugins": [{ "module": "./rules/plantly.mjs", "options": { "forbiddenNames": ["Greg", "PlantIn"] } }]
+}

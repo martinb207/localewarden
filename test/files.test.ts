@@ -61,7 +61,7 @@ describe('JSON helpers', () => {
   });
 
   it('keeps the indentation of existing files', () => {
-    expect(detectFormat('{\n    "a": 1\n}\n')).toEqual({ indent: '    ', finalNewline: true });
+    expect(detectFormat('{\n    "a": 1\n}\n')).toEqual({ indent: '    ', finalNewline: true, eol: '\n', bom: false });
     expect(detectFormat(null).indent).toBe('  ');
   });
 });
